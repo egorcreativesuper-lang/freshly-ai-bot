@@ -2,7 +2,7 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import datetime
 import os
 import json
@@ -15,37 +15,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 🔑 Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не задан!")
-    exit(1)
+BOT_TOKEN = "8123646923:AAGUnlS9WMD65B4USzmHyGm3AGcgxDZ5U28"
 
-# 📊 Google Таблица — ИСПОЛЬЗУЕМ ФАЙЛ credentials.json
+# 📊 Google Таблица — используем google-auth (современная библиотека)
 try:
-    # Создаём файл credentials.json из переменных окружения
+    # JSON-данные сервисного аккаунта
     creds_data = {
         "type": "service_account",
-        "project_id": os.getenv("GSPREAD_PROJECT_ID"),
-        "private_key_id": os.getenv("GSPREAD_PRIVATE_ID"),
-        "private_key": os.getenv("GSPREAD_PRIVATE_KEY").replace('\\n', '\n') if os.getenv("GSPREAD_PRIVATE_KEY") else None,
-        "client_email": os.getenv("GSPREAD_CLIENT_EMAIL"),
-        "client_id": os.getenv("GSPREAD_CLIENT_ID"),
+        "project_id": "freshly-471815",
+        "private_key_id": "cf74c5d008258cb35b907e322079eb5f2f2e429f",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCtkWviQ0ANLhCM\n84gfQLeR+ckrK/Yq6K3vmAh7hqHw72XQF+LaBcbrtPvovTOVfwV0QTqP1W08VGxP\nI+lofvpDZxMEkDGIyvm3U1N+7EBiWw4tIL3KDMWtsqVVDDBnaXHOXjbbepfMX6F8\nmsTZehRpD3owGRyZr0y5adaDfGHLUqhjARTKfMmy3IGtminP9721iW8TYf6v2i+o\n66xXkdeb1q6Q2pgOpmZ+JDuGibLsF8cYHPVuDNqSV87/xwlQ+FNFKzCo6WtW+so2\nI0vTww2EEXjxZqrByNT0dtPxjexN7IRqgUA/7Pk4EOSHFj+a6uHNYm8QA1Mn7Fkr\nKgXvv0ydAgMBAAECggEAH+PYa9fZ2KIWUeN75uwb3lMD4m3/GoaqUJuBMXr83ZkK\nvpdo65CEqjGUWECNDgJq1N+YPC2lVqCXTtolDDlKT6CMVroMk9rhU0zYyjjronai\n7ek2Xb2Hg4DPjkcBTLrLuXRHhX9qjRckA1InaWLcBaqdk2FFxzn1cZqv2nQ7vqC5\nZp7oxIhcs38FErVP/Xs1EsDBxYU5j+Gng2F5y/Nnrgk3FpEci5t1cBm8HIas0NKq\nU5AMNw38EF0FYMKVMeGQpvg/sU+F0Ey21VH1tDZCXoOODtsePrCP2gokI/zO+biE\nkCJjOVXCRpXjWajXuinRRSVjWFnwZDnx1pW5H6OvwQKBgQDg6ctfWJp66a1n4hnB\n1A4UFLWOaCQg6udYmAvehBdPJvbKYdmzW6SNvWW4gBlUPLDRlLQDHrUweA7nM9U9\ngzVZbMOugGYqg86Mk6umQiGuVyh2GNXnM9Y/sJURaOSdEEnd4o0ncUCWGt/hnx8X\nGpwiQT4MizLyKBUhn3f+fatZQQKBgQDFjttVdMBbAL4yXJLGsTSRDrsWb31j4c4G\nX+IEQP8dT7rWX9g8biqbYO0GVWNbTKzgIZwy9yqna/sWemrn9VpzAF7R9nCzdWjB\nV1aJ6TO9123+EdInKFPj7mZd7BoZ7LwkDb1wl2sZkqPl1kc0mSDE37fXP5m6xchN\nMXyj4afgXQKBgEq7ZGf5+Np+aq/p4MUWwNbLSshWsip94wD9BHSbT2NtfvMgMEX4\nXWT7WaFEbyYeRGJfFrEysuG4Aruv7VrTDhb4nMyOvWPDCA6NwqsrriVPsJINDoYU\nI0xmUCHIyK2ni+O+M0i3yM4Xf+xoAtyaaua25vckCXmM9/iEFErrVtQBAoGAQ97P\nRW2Fw/3eWcjp9+7bI1aPOab1ygHCWPhJ2rJFstk4U/u7ew9R/e1voLRnHO+bmKiT\nVAMMGVaEfXVzEtt8xnODH9jtYQneAkYyCdEfIIJJXHbc3u0A3RaC/pNlaDCndi9u\nPKcYeUGiowxZjB1rX5eIPh+wfbUDGln8+wREO1UCgYBmN6sfcDUjTwMtAcyaikju\nqNCTXnA1pa2UHY7+r3gWTTeBQY9ncZYzkrS32hKwsCB+EW4QNRSsuUaK+TuXPl/0\n+UWYGWaoTw7TJC0N8B8GtfhNqe40Up1qGhXLGtKHCWqF4DSNntbnNfN90QH3igbE\nASi34mUKhWfeorb0azi9xg==\n-----END PRIVATE KEY-----\n",
+        "client_email": "freshly@freshly-471815.iam.gserviceaccount.com",
+        "client_id": "108328236847731558238",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_x509_cert_url": os.getenv("GSPREAD_CLIENT_CERT_URL")
+        "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/freshly%40freshly-471815.iam.gserviceaccount.com",
+        "universe_domain": "googleapis.com"
     }
 
-    # Записываем в файл credentials.json
+    # Создаём временный файл credentials.json
     with open("credentials.json", "w") as f:
         json.dump(creds_data, f)
 
-    # Авторизуемся через файл
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    # Авторизация через google-auth
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
     client = gspread.authorize(creds)
-    SHEET_URL = os.getenv("SHEET_URL")
+
+    # Открываем таблицу
+    SHEET_URL = "https://docs.google.com/spreadsheets/d/10kN4te505m4ALsv5Ixo5WsSH4Uot2AQ3Kni05Mwn_WE"
     sheet = client.open_by_url(SHEET_URL).sheet1
+
     logger.info("✅ Успешно подключились к Google Таблице")
 
 except Exception as e:
