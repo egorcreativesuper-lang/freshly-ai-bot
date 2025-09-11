@@ -5,6 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import datetime
 import os
+import json
 
 # 🔧 Включаем логирование
 logging.basicConfig(
@@ -19,10 +20,10 @@ if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не задан!")
     exit(1)
 
-# 📊 Google Таблица — ВЕСЬ БЛОК ИНИЦИАЛИЗАЦИИ В ОДНОМ TRY
+# 📊 Google Таблица — ИСПОЛЬЗУЕМ ФАЙЛ credentials.json
 try:
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = {
+    # Создаём файл credentials.json из переменных окружения
+    creds_data = {
         "type": "service_account",
         "project_id": os.getenv("GSPREAD_PROJECT_ID"),
         "private_key_id": os.getenv("GSPREAD_PRIVATE_ID"),
@@ -35,12 +36,13 @@ try:
         "client_x509_cert_url": os.getenv("GSPREAD_CLIENT_CERT_URL")
     }
 
-    # Проверяем обязательные поля
-    if not all([creds_dict["project_id"], creds_dict["private_key"], creds_dict["client_email"]]):
-        logger.error("❌ Не хватает данных для Google Credentials!")
-        exit(1)
+    # Записываем в файл credentials.json
+    with open("credentials.json", "w") as f:
+        json.dump(creds_data, f)
 
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    # Авторизуемся через файл
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
     SHEET_URL = os.getenv("SHEET_URL")
     sheet = client.open_by_url(SHEET_URL).sheet1
@@ -50,7 +52,7 @@ except Exception as e:
     logger.error(f"❌ Ошибка при подключении к Google Таблице: {e}")
     exit(1)
 
-# 🤖 Команды бота — ТЕПЕРЬ ЗДЕСЬ, ПОСЛЕ ЗАКРЫТОГО TRY
+# 🤖 Команды бота
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🍏 Привет! Я — Freshly AI.\n"
@@ -103,7 +105,7 @@ async def mark_eaten(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Ошибка в /eaten: {e}")
         await update.message.reply_text("❗ Используй: /eaten [номер]")
 
-# 🚀 Запуск — ТЕПЕРЬ ЗДЕСЬ, ПОСЛЕ ФУНКЦИЙ
+# 🚀 Запуск
 def main():
     try:
         app = Application.builder().token(BOT_TOKEN).build()
