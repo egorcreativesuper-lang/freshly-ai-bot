@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -10,7 +11,7 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Состояния
 WAITING_PRODUCT, WAITING_DATE = range(2)
 
-# База продуктов — расширена
+# База продуктов
 PRODUCTS_DATA = {
     "молоко": {"shelf_life": 7, "category": "молочные"},
     "кефир": {"shelf_life": 5, "category": "молочные"},
@@ -54,7 +55,6 @@ class Database:
         self.init_db()
 
     def init_db(self):
-        """Инициализация базы данных SQLite"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -77,7 +77,6 @@ class Database:
             conn.commit()
 
     async def add_user(self, user_id: int, username: str):
-        """Добавление пользователя"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -87,7 +86,6 @@ class Database:
             conn.commit()
 
     async def add_product(self, user_id: int, product_name: str, purchase_date: datetime) -> bool:
-        """Добавление продукта"""
         if product_name not in PRODUCTS_DATA:
             return False
 
@@ -104,7 +102,6 @@ class Database:
         return True
 
     async def get_user_products(self, user_id: int):
-        """Получение продуктов пользователя"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -116,7 +113,6 @@ class Database:
             return cursor.fetchall()
 
     async def get_products_count(self, user_id: int) -> int:
-        """Получение количества продуктов пользователя"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = ?', (user_id,))
@@ -124,14 +120,12 @@ class Database:
             return result[0] if result else 0
 
     async def clear_user_products(self, user_id: int):
-        """Очистка продуктов пользователя"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
             conn.commit()
 
     async def get_expiring_products(self):
-        """Получение продуктов, срок которых истекает завтра"""
         tomorrow = (datetime.now() + timedelta(days=1)).date()
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
@@ -144,7 +138,6 @@ class Database:
             return cursor.fetchall()
 
     async def mark_as_notified(self, user_id: int, product_name: str):
-        """Пометить продукт как уведомленный"""
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -163,14 +156,70 @@ class FreshlyBot:
         self.scheduler = AsyncIOScheduler()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /start"""
+        """Обработчик команды /start — красивое приветствие с анимацией и картинкой"""
         user = update.effective_user
         await self.db.add_user(user.id, user.username)
 
-        await self.show_main_menu(update, context)
+        # Ссылки на медиа (можно заменить на свои)
+        animation_url = "https://i.imgur.com/6JQV9Xj.gif"  # Анимация: часы + продукты
+        fallback_image_url = "https://i.imgur.com/8Y0fKuB.png"  # Фото холодильника
+
+        # Красивый текст
+        welcome_text = (
+            f"👋 Привет, {user.first_name}! Я *Freshly Bot* — твой личный помощник по срокам годности продуктов.\n\n"
+            "📌 **Что я умею:**\n"
+            "• 📋 Добавить продукт с датой покупки\n"
+            "• ⏳ Автоматически отслеживать сроки годности\n"
+            "• 🛎️ Уведомлять за день до истечения срока\n"
+            "• 🍽️ Подсказывать рецепты для просроченных продуктов\n"
+            "• 🗑️ Очищать список при необходимости\n\n"
+            "✅ Максимум 5 продуктов одновременно — чтобы не перегружать память!\n\n"
+            "🎯 Начни с кнопки *➕ Добавить продукт* — выбери продукт и дату покупки, и я сделаю всё остальное!\n\n"
+            "💡 *Полезные советы:* \n"
+            "• Используй «Вчера» или «Сегодня» — удобно!\n"
+            "• Если продукт просрочился — я подскажу, что можно сделать!"
+        )
+
+        # Пробуем отправить анимацию
+        try:
+            await update.message.reply_animation(
+                animation=animation_url,
+                caption=welcome_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
+                    [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
+                    [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
+                ])
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить анимацию: {e}")
+            # Если анимация не прошла — отправляем фото
+            try:
+                await update.message.reply_photo(
+                    photo=fallback_image_url,
+                    caption=welcome_text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
+                        [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
+                        [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
+                    ])
+                )
+            except Exception as e2:
+                logger.error(f"Не удалось отправить фото: {e2}")
+                # Если и фото не прошло — просто текст
+                await update.message.reply_text(
+                    welcome_text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
+                        [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
+                        [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
+                    ])
+                )
 
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Главное меню с инлайн-кнопками"""
         text = "🎯 Выберите действие:"
         keyboard = [
             [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
@@ -178,249 +227,194 @@ class FreshlyBot:
             [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        if update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(text, reply_markup=reply_markup)
+        await self._edit_or_reply(update, text, reply_markup)
 
     async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Показать список продуктов"""
         user = update.effective_user
         products = await self.db.get_user_products(user.id)
 
         if not products:
             text = "📭 У вас нет добавленных продуктов."
-            await self._edit_or_reply(update, text)
-            return
-
-        message = "📋 **Ваши продукты:**\n\n"
-        today = datetime.now().date()
-
-        for product_name, purchase_date, expiration_date in products:
-            days_left = (expiration_date - today).days
-
-            if days_left < 0:
-                status = "🔴"
-                status_text = "ПРОСРОЧЕНО"
-            elif days_left == 0:
-                status = "🔴"
-                status_text = "Истекает сегодня"
-            elif days_left == 1:
-                status = "🟠"
-                status_text = "Истекает завтра"
-            elif days_left <= 3:
-                status = "🟡"
-                status_text = f"Истекает через {days_left} дня"
-            else:
-                status = "🟢"
-                status_text = f"Осталось {days_left} дней"
-
-            message += f"{status} **{product_name}**\n"
-            message += f"   📅 Куплен: {purchase_date}\n"
-            message += f"   ⏳ Срок до: {expiration_date} ({status_text})\n\n"
-
-        products_count = await self.db.get_products_count(user.id)
-        message += f"📊 Всего продуктов: {products_count}/5"
+        else:
+            text = "📋 **Ваши продукты:**\n\n"
+            today = datetime.now().date()
+            for product_name, purchase_date, expiration_date in products:
+                days_left = (expiration_date - today).days
+                if days_left < 0:
+                    status, status_text = "🔴", "ПРОСРОЧЕНО"
+                elif days_left == 0:
+                    status, status_text = "🔴", "Истекает сегодня"
+                elif days_left == 1:
+                    status, status_text = "🟠", "Истекает завтра"
+                elif days_left <= 3:
+                    status, status_text = "🟡", f"Истекает через {days_left} дня"
+                else:
+                    status, status_text = "🟢", f"Осталось {days_left} дней"
+                text += f"{status} **{product_name}**\n   📅 Куплен: {purchase_date}\n   ⏳ Срок до: {expiration_date} ({status_text})\n\n"
+            products_count = await self.db.get_products_count(user.id)
+            text += f"📊 Всего продуктов: {products_count}/5"
 
         keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await self._edit_or_reply(update, message, reply_markup)
+        await self._edit_or_reply(update, text, reply_markup)
 
     async def clear_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Очистка всех продуктов"""
         user = update.effective_user
         await self.db.clear_user_products(user.id)
-        text = "✅ Все продукты удалены!"
-        await self._edit_or_reply(update, text)
+        await self._edit_or_reply(update, "✅ Все продукты удалены!")
+        await asyncio.sleep(1)
         await self.show_main_menu(update, context)
 
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Начало добавления продукта — выбор из инлайн-кнопок"""
         user = update.effective_user
-        products_count = await self.db.get_products_count(user.id)
-
-        if products_count >= 5:
-            text = "❌ Вы достигли лимита (5 продуктов). Используйте 🗑️ Очистить чтобы освободить место."
-            await self._edit_or_reply(update, text)
+        if await self.db.get_products_count(user.id) >= 5:
+            await self._edit_or_reply(update, "❌ Лимит 5 продуктов. Очистите список.")
+            await asyncio.sleep(1)
             await self.show_main_menu(update, context)
             return ConversationHandler.END
 
-        # Группируем продукты по 2 в строке
         keyboard = []
-        product_list = list(PRODUCTS_DATA.keys())
-        for i in range(0, len(product_list), 2):
-            row = []
-            for j in range(2):
-                if i + j < len(product_list):
-                    name = product_list[i + j]
-                    row.append(InlineKeyboardButton(name.capitalize(), callback_data=f"product_{name}"))
+        products = list(PRODUCTS_DATA.keys())
+        for i in range(0, len(products), 2):
+            row = [
+                InlineKeyboardButton(products[i].capitalize(), callback_data=f"product_{products[i]}")
+            ]
+            if i + 1 < len(products):
+                row.append(InlineKeyboardButton(products[i+1].capitalize(), callback_data=f"product_{products[i+1]}"))
             keyboard.append(row)
-
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await self._edit_or_reply(update, "📦 Выберите продукт:", reply_markup)
-
         return WAITING_PRODUCT
 
-    async def handle_product_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Обработка выбора продукта через инлайн-кнопку"""
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
 
-        if query.data == "cancel":
-            await query.edit_message_text("❌ Операция отменена.")
+        # Главное меню и навигация
+        if query.data == "back_to_menu":
             await self.show_main_menu(update, context)
             return ConversationHandler.END
 
-        product_name = query.data[len("product_"):]
-        context.user_data['current_product'] = product_name
+        # Очистка
+        elif query.data == "clear_products":
+            await self.clear_products(update, context)
+            return ConversationHandler.END
 
-        keyboard = [
-            [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
-            [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
-            [InlineKeyboardButton("⏪ 2 дня назад", callback_data="two_days_ago")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_product"),
-             InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Список продуктов
+        elif query.data == "list_products":
+            await self.list_products(update, context)
+            return ConversationHandler.END
 
-        await query.edit_message_text(
-            f"📦 Продукт: **{product_name}**\n📆 Когда вы его купили?",
-            reply_markup=reply_markup
-        )
-
-        return WAITING_DATE
-
-    async def handle_date_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Обработка выбора даты покупки"""
-        query = update.callback_query
-        await query.answer()
-
-        if query.data == "cancel":
+        # Отмена на любом этапе
+        elif query.data == "cancel":
             await query.edit_message_text("❌ Операция отменена.")
+            await asyncio.sleep(1)
             await self.show_main_menu(update, context)
             return ConversationHandler.END
 
-        if query.data == "back_to_product":
+        # Выбор продукта
+        elif query.data.startswith("product_"):
+            product_name = query.data[8:]  # len("product_") == 8
+            context.user_data['current_product'] = product_name
+
+            keyboard = [
+                [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
+                [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
+                [InlineKeyboardButton("⏪ 2 дня назад", callback_data="two_days_ago")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_product"),
+                 InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"📦 Продукт: **{product_name}**\n📆 Когда вы его купили?",
+                reply_markup=reply_markup
+            )
+            return WAITING_DATE
+
+        # Назад к выбору продукта
+        elif query.data == "back_to_product":
             return await self.add_product_start(update, context)
 
-        try:
+        # Выбор даты
+        elif query.data in ["today", "yesterday", "two_days_ago"]:
+            product_name = context.user_data.get('current_product')
+            if not product_name:
+                await query.edit_message_text("❌ Ошибка: продукт не выбран.")
+                await asyncio.sleep(1)
+                await self.show_main_menu(update, context)
+                return ConversationHandler.END
+
             if query.data == "today":
                 purchase_date = datetime.now()
             elif query.data == "yesterday":
                 purchase_date = datetime.now() - timedelta(days=1)
             elif query.data == "two_days_ago":
                 purchase_date = datetime.now() - timedelta(days=2)
-            else:
-                await query.edit_message_text("❌ Пожалуйста, выберите дату из кнопок.")
-                return WAITING_DATE
 
-            product_name = context.user_data['current_product']
             success = await self.db.add_product(query.from_user.id, product_name, purchase_date)
-
             if success:
                 shelf_life = PRODUCTS_DATA[product_name]['shelf_life']
                 expiration_date = purchase_date + timedelta(days=shelf_life)
                 days_left = (expiration_date.date() - datetime.now().date()).days
-
-                message = f"✅ **{product_name}** добавлен!\n"
-                message += f"📅 Срок годности: {expiration_date.strftime('%d.%m.%Y')}\n"
-                message += f"⏳ Осталось дней: {days_left}"
-
-                await query.edit_message_text(message)
-
-                # Через 2 секунды показываем главное меню
-                await asyncio.sleep(2)
-                await self.show_main_menu(update, context)
-
-                return ConversationHandler.END
+                msg = f"✅ **{product_name}** добавлен!\n📅 Срок: {expiration_date.strftime('%d.%m.%Y')}\n⏳ Осталось: {days_left} дней"
             else:
-                await query.edit_message_text("❌ Ошибка при добавлении продукта.")
+                msg = "❌ Ошибка при добавлении продукта."
 
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await query.edit_message_text("❌ Произошла ошибка. Попробуйте снова.")
-            return WAITING_DATE
-
-        return ConversationHandler.END
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Универсальный обработчик всех инлайн-кнопок"""
-        query = update.callback_query
-        await query.answer()
-
-        if query.data == "add_product":
-            return await self.add_product_start(update, context)
-        elif query.data == "list_products":
-            await self.list_products(update, context)
-            return ConversationHandler.END
-        elif query.data == "clear_products":
-            await self.clear_products(update, context)
-            return ConversationHandler.END
-        elif query.data == "back_to_menu":
+            await query.edit_message_text(msg)
+            await asyncio.sleep(2)
             await self.show_main_menu(update, context)
             return ConversationHandler.END
-        elif query.data.startswith("product_"):
-            return await self.handle_product_selection(update, context)
-        elif query.data in ["today", "yesterday", "two_days_ago", "cancel", "back_to_product"]:
-            return await self.handle_date_selection(update, context)
+
+        # Добавление продукта
+        elif query.data == "add_product":
+            return await self.add_product_start(update, context)
+
+        # Неизвестная команда
         else:
-            await query.edit_message_text("Неизвестная команда.")
+            await query.edit_message_text("❓ Неизвестная команда.")
+            await asyncio.sleep(1)
+            await self.show_main_menu(update, context)
             return ConversationHandler.END
 
     async def _edit_or_reply(self, update: Update, text: str, reply_markup=None) -> None:
-        """Универсальный метод для редактирования или отправки сообщения"""
         try:
             if update.callback_query:
                 await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
             else:
                 await update.message.reply_text(text, reply_markup=reply_markup)
         except Exception as e:
-            logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            logger.warning(f"Не удалось отредактировать: {e}")
             if update.callback_query:
                 await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
             else:
                 await update.message.reply_text(text, reply_markup=reply_markup)
 
     async def check_expiring_products(self):
-        """Проверка продуктов с истекающим сроком — отправка уведомлений"""
         try:
-            expiring_products = await self.db.get_expiring_products()
-
-            for user_id, username, product_name, expiration_date in expiring_products:
+            expiring = await self.db.get_expiring_products()
+            for user_id, _, product_name, _ in expiring:
                 try:
-                    message = f"⚠️ Твой **{product_name}** испортится завтра!\n"
-
-                    category = PRODUCTS_DATA[product_name]['category']
-                    if category == "молочные":
-                        message += "🍳 Попробуй приготовить сырники или молочный коктейль!"
-                    elif category == "мясо":
-                        message += "🍖 Попробуй жаркое или гуляш!"
-                    elif category == "рыба":
-                        message += "🐟 Попробуй запечённую рыбу с овощами!"
-                    elif category == "хлеб":
-                        message += "🍞 Сделай гренки или сухарики!"
-                    elif category == "фрукты":
-                        message += "🥗 Сделай фруктовый салат!"
-                    elif category == "овощи":
-                        message += "🍲 Приготовь суп или рагу!"
-                    else:
-                        message += "🥡 Используй его сегодня!"
-
-                    await self.application.bot.send_message(chat_id=user_id, text=message)
+                    msg = f"⚠️ **{product_name}** испортится завтра!\n"
+                    cat = PRODUCTS_DATA[product_name]['category']
+                    tips = {
+                        "молочные": "Сделайте сырники или коктейль!",
+                        "мясо": "Приготовьте жаркое или гуляш!",
+                        "рыба": "Запеките с овощами!",
+                        "хлеб": "Сделайте гренки!",
+                        "фрукты": "Приготовьте салат!",
+                        "овощи": "Сварите суп!",
+                    }
+                    msg += tips.get(cat, "Используйте его сегодня!")
+                    await self.application.bot.send_message(user_id, msg)
                     await self.db.mark_as_notified(user_id, product_name)
-
                 except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
-
+                    logger.error(f"Ошибка отправки {user_id}: {e}")
         except Exception as e:
-            logger.error(f"Ошибка проверки продуктов: {e}")
+            logger.error(f"Ошибка проверки: {e}")
 
     def setup_handlers(self):
-        """Настройка обработчиков — только инлайн, без текстовых fallback"""
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("start", self.start),
@@ -428,47 +422,37 @@ class FreshlyBot:
             ],
             states={
                 WAITING_PRODUCT: [
-                    CallbackQueryHandler(self.button_handler, pattern=r"^product_.*$|^cancel$"),
+                    CallbackQueryHandler(self.button_handler, pattern=r"^(product_.+|cancel)$")
                 ],
                 WAITING_DATE: [
-                    CallbackQueryHandler(self.button_handler, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$"),
+                    CallbackQueryHandler(self.button_handler, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$")
                 ]
             },
             fallbacks=[
-                CallbackQueryHandler(self.button_handler, pattern=r"^cancel$"),
+                CallbackQueryHandler(self.button_handler, pattern=r"^cancel$")
             ],
             per_message=False,
             allow_reentry=True
         )
-
         self.application.add_handler(conv_handler)
 
     def setup_scheduler(self):
-        """Настройка планировщика уведомлений"""
-        self.scheduler.add_job(
-            self.check_expiring_products,
-            trigger=CronTrigger(hour=10, minute=0),
-            id='daily_check'
-        )
+        self.scheduler.add_job(self.check_expiring_products, CronTrigger(hour=10, minute=0), id='daily_check')
 
     def run(self):
-        """Запуск бота и планировщика"""
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         self.setup_scheduler()
         self.scheduler.start()
-        logger.info("🚀 Бот запускается...")
+        logger.info("🚀 Бот запущен")
         self.application.run_polling()
 
 
 def main():
-    """Основная функция"""
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-
     if not BOT_TOKEN:
-        logger.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        logger.error("Установите TELEGRAM_BOT_TOKEN")
         return
-
     bot = FreshlyBot(BOT_TOKEN)
     bot.run()
 
