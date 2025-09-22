@@ -371,6 +371,7 @@ class FreshlyBot:
             self.check_expiring_products,
             trigger=CronTrigger(hour=10, minute=0),
             id='daily_check'
+        )
     
     def run(self):
         self.scheduler.start()
