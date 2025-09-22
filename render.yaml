@@ -8,9 +8,4 @@ services:
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        value: 8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA
-      - key: RENDER_EXTERNAL_URL
-        fromService:
-          type: web
-          name: freshly-bot
-          property: url
+        value: "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"  # ЗАМЕНИТЕ НА РЕАЛЬНЫЙ ТОКЕН
