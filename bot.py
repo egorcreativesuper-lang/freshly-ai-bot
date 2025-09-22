@@ -156,15 +156,13 @@ class FreshlyBot:
         self.scheduler = AsyncIOScheduler()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /start — красивое приветствие с анимацией и картинкой"""
+        """Обработчик команды /start — красивое приветствие с анимацией"""
         user = update.effective_user
         await self.db.add_user(user.id, user.username)
 
-        # Ссылки на медиа (можно заменить на свои)
-        animation_url = "https://i.imgur.com/6JQV9Xj.gif"  # Анимация: часы + продукты
-        fallback_image_url = "https://i.imgur.com/8Y0fKuB.png"  # Фото холодильника
+        animation_url = "https://i.imgur.com/6JQV9Xj.gif"
+        fallback_image_url = "https://i.imgur.com/8Y0fKuB.png"
 
-        # Красивый текст
         welcome_text = (
             f"👋 Привет, {user.first_name}! Я *Freshly Bot* — твой личный помощник по срокам годности продуктов.\n\n"
             "📌 **Что я умею:**\n"
@@ -180,7 +178,6 @@ class FreshlyBot:
             "• Если продукт просрочился — я подскажу, что можно сделать!"
         )
 
-        # Пробуем отправить анимацию
         try:
             await update.message.reply_animation(
                 animation=animation_url,
@@ -194,7 +191,6 @@ class FreshlyBot:
             )
         except Exception as e:
             logger.warning(f"Не удалось отправить анимацию: {e}")
-            # Если анимация не прошла — отправляем фото
             try:
                 await update.message.reply_photo(
                     photo=fallback_image_url,
@@ -208,7 +204,6 @@ class FreshlyBot:
                 )
             except Exception as e2:
                 logger.error(f"Не удалось отправить фото: {e2}")
-                # Если и фото не прошло — просто текст
                 await update.message.reply_text(
                     welcome_text,
                     parse_mode="Markdown",
@@ -219,17 +214,38 @@ class FreshlyBot:
                     ])
                 )
 
-    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def show_main_menu_with_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Главное меню с фото холодильника"""
+        image_url = "https://i.imgur.com/8Y0fKuB.png"
         text = "🎯 Выберите действие:"
+
         keyboard = [
             [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
             [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
             [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await self._edit_or_reply(update, text, reply_markup)
+
+        try:
+            if update.callback_query:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить фото: {e}")
+            await self._edit_or_reply(update, text, reply_markup)
 
     async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показать список продуктов с кнопкой 'Назад в меню'"""
         user = update.effective_user
         products = await self.db.get_user_products(user.id)
 
@@ -256,21 +272,33 @@ class FreshlyBot:
 
         keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await self._edit_or_reply(update, text, reply_markup)
+
+        if update.callback_query:
+            try:
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+            except Exception:
+                await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
     async def clear_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         await self.db.clear_user_products(user.id)
-        await self._edit_or_reply(update, "✅ Все продукты удалены!")
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text("✅ Все продукты удалены!")
+        else:
+            await update.message.reply_text("✅ Все продукты удалены!")
+
         await asyncio.sleep(1)
-        await self.show_main_menu(update, context)
+        await self.show_main_menu_with_photo(update, context)
 
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user = update.effective_user
         if await self.db.get_products_count(user.id) >= 5:
             await self._edit_or_reply(update, "❌ Лимит 5 продуктов. Очистите список.")
             await asyncio.sleep(1)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
         keyboard = []
@@ -292,31 +320,26 @@ class FreshlyBot:
         query = update.callback_query
         await query.answer()
 
-        # Главное меню и навигация
         if query.data == "back_to_menu":
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
-        # Очистка
         elif query.data == "clear_products":
             await self.clear_products(update, context)
             return ConversationHandler.END
 
-        # Список продуктов
         elif query.data == "list_products":
             await self.list_products(update, context)
             return ConversationHandler.END
 
-        # Отмена на любом этапе
         elif query.data == "cancel":
             await query.edit_message_text("❌ Операция отменена.")
             await asyncio.sleep(1)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
-        # Выбор продукта
         elif query.data.startswith("product_"):
-            product_name = query.data[8:]  # len("product_") == 8
+            product_name = query.data[8:]
             context.user_data['current_product'] = product_name
 
             keyboard = [
@@ -329,21 +352,20 @@ class FreshlyBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
                 f"📦 Продукт: **{product_name}**\n📆 Когда вы его купили?",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
             )
             return WAITING_DATE
 
-        # Назад к выбору продукта
         elif query.data == "back_to_product":
             return await self.add_product_start(update, context)
 
-        # Выбор даты
         elif query.data in ["today", "yesterday", "two_days_ago"]:
             product_name = context.user_data.get('current_product')
             if not product_name:
                 await query.edit_message_text("❌ Ошибка: продукт не выбран.")
                 await asyncio.sleep(1)
-                await self.show_main_menu(update, context)
+                await self.show_main_menu_with_photo(update, context)
                 return ConversationHandler.END
 
             if query.data == "today":
@@ -362,34 +384,32 @@ class FreshlyBot:
             else:
                 msg = "❌ Ошибка при добавлении продукта."
 
-            await query.edit_message_text(msg)
+            await query.edit_message_text(msg, parse_mode="Markdown")
             await asyncio.sleep(2)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
-        # Добавление продукта
         elif query.data == "add_product":
             return await self.add_product_start(update, context)
 
-        # Неизвестная команда
         else:
             await query.edit_message_text("❓ Неизвестная команда.")
             await asyncio.sleep(1)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
     async def _edit_or_reply(self, update: Update, text: str, reply_markup=None) -> None:
         try:
             if update.callback_query:
-                await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
             else:
-                await update.message.reply_text(text, reply_markup=reply_markup)
+                await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
         except Exception as e:
             logger.warning(f"Не удалось отредактировать: {e}")
             if update.callback_query:
-                await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+                await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
             else:
-                await update.message.reply_text(text, reply_markup=reply_markup)
+                await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
     async def check_expiring_products(self):
         try:
@@ -407,7 +427,7 @@ class FreshlyBot:
                         "овощи": "Сварите суп!",
                     }
                     msg += tips.get(cat, "Используйте его сегодня!")
-                    await self.application.bot.send_message(user_id, msg)
+                    await self.application.bot.send_message(user_id, msg, parse_mode="Markdown")
                     await self.db.mark_as_notified(user_id, product_name)
                 except Exception as e:
                     logger.error(f"Ошибка отправки {user_id}: {e}")
