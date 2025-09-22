@@ -364,6 +364,30 @@ class FreshlyBot:
         self.application.add_handler(CommandHandler("clear", self.clear_products))
         self.application.add_handler(conv_handler)
     
+   import os
+import logging
+from telegram.ext import Application
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class FreshlyBot:
+    def __init__(self, token):
+        self.application = Application.builder().token(token).build()
+        self.scheduler = AsyncIOScheduler()
+
+    def setup_handlers(self):
+        # Здесь добавьте ваши хендлеры, например:
+        # from telegram.ext import CommandHandler
+        # self.application.add_handler(CommandHandler("start", self.start))
+        pass  # Замените на реальную настройку
+
     def setup_scheduler(self):
         """Настройка планировщика уведомлений"""
         # Проверка каждый день в 10:00
@@ -372,41 +396,31 @@ class FreshlyBot:
             trigger=CronTrigger(hour=10, minute=0),
             id='daily_check'
         )
-    
-    def run(self):
-        self.scheduler.start()
-        self.application.run_polling()  # ← Без await и asyncio.run!
 
-if __name__ == '__main__':
-    bot = FreshlyBot("TELEGRAM_BOT_TOKEN")
-    bot.setup_handlers()  # ← настраиваем ДО запуска
-    bot.run()             # ← запускаем — это блокирующий вызов!
-        
-        # Настраиваем обработчики
-        self.setup_handlers()
-        
-        # Настраиваем планировщик
-        self.setup_scheduler()
-        self.scheduler.start()
-        
-        # Запускаем бота
+    async def check_expiring_products(self):
+        # Ваша логика проверки продуктов
+        logger.info("Проверка сроков годности...")
+
+    def run(self):
+        """Запуск бота и планировщика"""
+        self.setup_handlers()   # Настраиваем хендлеры
+        self.setup_scheduler()  # Настраиваем планировщик
+        self.scheduler.start()  # Запускаем планировщик
         logger.info("Бот запускается...")
-        await self.application.run_polling()
+        self.application.run_polling()  # ← Синхронный метод, НЕ через asyncio.run()
+
 
 def main():
     """Основная функция"""
-    # Получаем токен из переменных окружения
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     if not BOT_TOKEN:
-        logger.error("Токен бота не найден! Установите переменную BOT_TOKEN")
+        logger.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
         return
-    
-    # Создаем и запускаем бота
+
     bot = FreshlyBot(BOT_TOKEN)
-    
-    # Запускаем асинхронно
-    asyncio.run(bot.run())
+    bot.run()  # ← Просто вызов, без asyncio.run()
+
 
 if __name__ == '__main__':
     main()
