@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
@@ -167,12 +167,13 @@ class FreshlyBot:
 🎯 Нажми на кнопку ниже, чтобы начать!
         """
 
-        # Главное меню с эмодзи
+        # Инлайн-кнопки
         keyboard = [
-            [KeyboardButton("➕ Добавить"), KeyboardButton("📋 Список")],
-            [KeyboardButton("🗑️ Очистить")]
+            [InlineKeyboardButton("➕ Добавить", callback_data="add_product")],
+            [InlineKeyboardButton("📋 Список", callback_data="list_products")],
+            [InlineKeyboardButton("🗑️ Очистить", callback_data="clear_products")]
         ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
@@ -253,13 +254,15 @@ class FreshlyBot:
 
         context.user_data['current_product'] = product_name
 
-        # Кнопки для выбора даты — с эмодзи и кнопкой НАЗАД
+        # Кнопки для выбора даты — инлайн
         keyboard = [
-            [KeyboardButton("📅 Сегодня"), KeyboardButton("⏪ Вчера")],
-            [KeyboardButton("⏪ 2 дня назад")],
-            [KeyboardButton("⬅️ Назад"), KeyboardButton("❌ Отмена")]
+            [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
+            [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
+            [InlineKeyboardButton("⏪ 2 дня назад", callback_data="two_days_ago")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_product"),
+             InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
         ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
             f"📦 Продукт: **{product_name}**\n"
@@ -271,48 +274,49 @@ class FreshlyBot:
 
     async def handle_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Обработка даты покупки"""
-        user_input = update.message.text
-        product_name = context.user_data.get('current_product')
-        user = update.effective_user
+        query = update.callback_query
+        await query.answer()  # Подтверждение нажатия
 
-        if user_input == "❌ Отмена":
-            await update.message.reply_text("❌ Операция отменена.")
+        callback_data = query.data
+
+        if callback_data == "cancel":
+            await query.edit_message_text("❌ Операция отменена.")
             return ConversationHandler.END
 
-        if user_input == "⬅️ Назад":
-            await update.message.reply_text("📝 Введите название продукта:")
-            return WAITING_PRODUCT  # Возврат к предыдущему шагу
+        if callback_data == "back_to_product":
+            await query.edit_message_text("📝 Введите название продукта:")
+            return WAITING_PRODUCT
 
         try:
-            if user_input == "📅 Сегодня":
+            if callback_data == "today":
                 purchase_date = datetime.now()
-            elif user_input == "⏪ Вчера":
+            elif callback_data == "yesterday":
                 purchase_date = datetime.now() - timedelta(days=1)
-            elif user_input == "⏪ 2 дня назад":
+            elif callback_data == "two_days_ago":
                 purchase_date = datetime.now() - timedelta(days=2)
             else:
-                await update.message.reply_text("❌ Пожалуйста, выберите дату из кнопок")
+                await query.edit_message_text("❌ Пожалуйста, выберите дату из кнопок")
                 return WAITING_DATE
 
             # Добавляем продукт
-            success = await self.db.add_product(user.id, product_name, purchase_date)
+            success = await self.db.add_product(query.from_user.id, context.user_data['current_product'], purchase_date)
 
             if success:
-                shelf_life = PRODUCTS_DATA[product_name]['shelf_life']
+                shelf_life = PRODUCTS_DATA[context.user_data['current_product']]['shelf_life']
                 expiration_date = purchase_date + timedelta(days=shelf_life)
                 days_left = (expiration_date.date() - datetime.now().date()).days
 
-                await update.message.reply_text(
-                    f"✅ **{product_name}** добавлен!\n"
+                await query.edit_message_text(
+                    f"✅ **{context.user_data['current_product']}** добавлен!\n"
                     f"📅 Срок годности: {expiration_date.strftime('%d.%m.%Y')}\n"
                     f"⏳ Осталось дней: {days_left}"
                 )
             else:
-                await update.message.reply_text("❌ Ошибка при добавлении продукта")
+                await query.edit_message_text("❌ Ошибка при добавлении продукта")
 
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-            await update.message.reply_text("❌ Ошибка, попробуйте снова")
+            await query.edit_message_text("❌ Ошибка, попробуйте снова")
             return ConversationHandler.END
 
         return ConversationHandler.END
@@ -321,11 +325,6 @@ class FreshlyBot:
         """Отмена текущей операции"""
         await update.message.reply_text("❌ Операция отменена.")
         return ConversationHandler.END
-
-    async def go_back(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Обработчик кнопки 'Назад' — возврат к вводу продукта"""
-        await update.message.reply_text("📝 Введите название продукта:")
-        return WAITING_PRODUCT
 
     async def check_expiring_products(self):
         """Проверка продуктов с истекающим сроком"""
@@ -359,45 +358,34 @@ class FreshlyBot:
             logger.error(f"Ошибка проверки продуктов: {e}")
 
     def setup_handlers(self):
-        """Настройка обработчиков команд и текстовых кнопок"""
+        """Настройка обработчиков команд"""
 
-        # Обработчики кнопок вне диалога
-        list_button_handler = MessageHandler(filters.Text(["📋 Список"]), self.list_products)
-        clear_button_handler = MessageHandler(filters.Text(["🗑️ Очистить"]), self.clear_products)
-
-        # Обработчик кнопки "Назад" — для fallback
-        back_button_handler = MessageHandler(filters.Text(["⬅️ Назад"]), self.go_back)
+        # Обработчики инлайн-кнопок
+        self.application.add_handler(CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$"))
 
         # ConversationHandler для добавления продукта
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('add', self.add_product_start),
-                MessageHandler(filters.Text(["➕ Добавить"]), self.add_product_start)
+                CommandHandler('list', self.list_products),
+                CommandHandler('clear', self.clear_products)
             ],
             states={
                 WAITING_PRODUCT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)
                 ],
                 WAITING_DATE: [
-                    MessageHandler(filters.Text(["📅 Сегодня", "⏪ Вчера", "⏪ 2 дня назад"]), self.handle_date),
-                    back_button_handler,  # ← Кнопка "Назад" внутри диалога
-                    MessageHandler(filters.Text(["❌ Отмена"]), self.cancel)
+                    CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$")
                 ]
             },
-            # fallbacks — чтобы кнопки "Список", "Очистить", "Отмена" работали даже внутри диалога
             fallbacks=[
-                MessageHandler(filters.Text(["📋 Список"]), self.list_products),
-                MessageHandler(filters.Text(["🗑️ Очистить"]), self.clear_products),
                 CommandHandler('cancel', self.cancel),
-                MessageHandler(filters.Text(["❌ Отмена"]), self.cancel),
-                back_button_handler  # на всякий случай
+                MessageHandler(filters.TEXT & ~filters.COMMAND, self.cancel)
             ]
         )
 
         # Регистрируем обработчики
         self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("list", self.list_products))
-        self.application.add_handler(CommandHandler("clear", self.clear_products))
         self.application.add_handler(conv_handler)
 
     def setup_scheduler(self):
