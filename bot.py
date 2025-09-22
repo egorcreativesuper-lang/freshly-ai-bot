@@ -191,7 +191,7 @@ class Database:
     async def add_product(self, user_id: int, product_name: str, purchase_date: datetime) -> bool:
         """Добавление продукта"""
         products_data = ProductManager.get_products_data()
-        if product_name not in products_
+        if product_name not in products_data:  # ← ИСПРАВЛЕНО!
             return False
 
         shelf_life = products_data[product_name]['shelf_life']
@@ -268,14 +268,18 @@ class FreshlyBot:
 
     def setup_signal_handlers(self):
         """Настройка обработчиков сигналов для graceful shutdown"""
-        def signal_handler(signum, frame):
-            logger.info(f"Получен сигнал {signum}, завершение работы...")
-            self._shutdown = True
+        async def shutdown_sequence():
+            logger.info("Запуск graceful shutdown...")
             if self.application:
-                self.application.stop()
+                await self.application.stop()
             if self.scheduler.running:
                 self.scheduler.shutdown()
+            logger.info("Бот остановлен корректно.")
             sys.exit(0)
+
+        def signal_handler(signum, frame):
+            logger.info(f"Получен сигнал {signum}, завершение работы...")
+            asyncio.create_task(shutdown_sequence())
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -335,7 +339,7 @@ class FreshlyBot:
 
     async def show_main_menu_with_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Главное меню с фото холодильника"""
-        image_url = "https://i.imgur.com/OjC80T8.jpeg"  # Ваша картинка
+        image_url = "https://i.imgur.com/OjC80T8.jpeg"  # ← ИСПРАВЛЕНО: убраны пробелы!
 
         text = "🎯 Выберите действие:"
         keyboard = [
@@ -720,7 +724,8 @@ class FreshlyBot:
             },
             fallbacks=[
                 CallbackQueryHandler(self.button_handler, pattern="^cancel$"),
-                CommandHandler("start", self.start)
+                CommandHandler("start", self.start),
+                CommandHandler("cancel", lambda u, c: ConversationHandler.END)  # ← ДОБАВЛЕНО
             ],
             per_message=False,
             allow_reentry=True
