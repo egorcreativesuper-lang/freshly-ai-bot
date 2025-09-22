@@ -4,7 +4,6 @@ import sqlite3
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,6 +21,8 @@ PRODUCTS_DATA = {
     "кефир": {"shelf_life": 5, "category": "молочные"},
     "сыр": {"shelf_life": 14, "category": "молочные"},
     "творог": {"shelf_life": 5, "category": "молочные"},
+    "сметана": {"shelf_life": 7, "category": "молочные"},
+    "йогурт": {"shelf_life": 10, "category": "молочные"},
 }
 
 class Database:
@@ -89,12 +90,10 @@ class Database:
             conn.commit()
 
 class FreshlyBot:
-    def __init__(self, token, webhook_url=None):
+    def __init__(self, token):
         self.token = token
-        self.webhook_url = webhook_url
         self.db = Database()
         self.application = None
-        self.scheduler = BackgroundScheduler()
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -123,8 +122,8 @@ class FreshlyBot:
         
         await update.message.reply_text(welcome_text, reply_markup=reply_markup)
     
-    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка фотографии продукта"""
+    async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало добавления продукта"""
         user = update.effective_user
         
         # Проверка лимита
@@ -191,6 +190,7 @@ class FreshlyBot:
                 await update.message.reply_text("❌ Ошибка при добавлении продукта")
         
         except Exception as e:
+            logger.error(f"Ошибка: {e}")
             await update.message.reply_text("❌ Ошибка, попробуйте снова")
             return ConversationHandler.END
         
@@ -250,8 +250,7 @@ class FreshlyBot:
         text = update.message.text
         
         if text == "📸 Добавить продукт":
-            # Имитируем отправку фото
-            await self.handle_photo(update, context)
+            await self.add_product_start(update, context)
         elif text == "📋 Мои продукты":
             await self.list_products(update, context)
     
@@ -260,8 +259,7 @@ class FreshlyBot:
         # ConversationHandler для добавления продукта
         conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(filters.PHOTO, self.handle_photo),
-                MessageHandler(filters.Regex("^📸 Добавить продукт$"), self.handle_photo)
+                MessageHandler(filters.Regex("^📸 Добавить продукт$"), self.add_product_start)
             ],
             states={
                 WAITING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_date)]
@@ -278,58 +276,28 @@ class FreshlyBot:
         # Обработчик кнопок
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
     
-    async def webhook_handler(self, request):
-        """Обработчик webhook запросов"""
-        update = Update.de_json(await request.json(), self.application.bot)
-        await self.application.process_update(update)
-        return {"status": "ok"}
-    
     def run(self):
         """Запуск бота"""
+        logger.info(f"Запуск бота с токеном: {self.token[:10]}...")
+        
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         
-        if self.webhook_url:
-            # Webhook режим для Render
-            import asyncio
-            from aiohttp import web
-            
-            async def main():
-                # Устанавливаем webhook
-                await self.application.bot.set_webhook(f"{self.webhook_url}/webhook")
-                
-                # Создаем aiohttp приложение
-                app = web.Application()
-                app.router.add_post('/webhook', self.webhook_handler)
-                app.router.add_get('/health', lambda request: web.Response(text="OK"))
-                
-                runner = web.AppRunner(app)
-                await runner.setup()
-                site = web.TCPSite(runner, '0.0.0.0', 10000)
-                await site.start()
-                
-                logger.info("Бот запущен в webhook режиме")
-                await asyncio.Future()  # Бесконечный цикл
-            
-            asyncio.run(main())
-        else:
-            # Polling режим для локального тестирования
-            logger.info("Бот запущен в polling режиме")
-            self.application.run_polling()
+        logger.info("Бот запущен в polling режиме")
+        self.application.run_polling()
 
 def main():
     """Основная функция"""
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
+    # Получаем токен из переменных окружения
+    BOT_TOKEN = os.environ.get('BOT_TOKEN')
+    
+    logger.info(f"Получен токен: {BOT_TOKEN[:10] if BOT_TOKEN else 'НЕТ ТОКЕНА'}...")
     
     if not BOT_TOKEN:
         logger.error("Токен бота не найден! Установите переменную BOT_TOKEN")
         return
     
-    # Используем webhook на Render, polling локально
-    webhook_url = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else None
-    
-    bot = FreshlyBot(BOT_TOKEN, webhook_url)
+    bot = FreshlyBot(BOT_TOKEN)
     bot.run()
 
 if __name__ == '__main__':
