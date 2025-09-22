@@ -289,7 +289,7 @@ class FreshlyBot:
 def main():
     """Основная функция"""
     # Получаем токен из переменных окружения
-    BOT_TOKEN = os.environ.get('BOT_TOKEN')
+    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     logger.info(f"Получен токен: {BOT_TOKEN[:10] if BOT_TOKEN else 'НЕТ ТОКЕНА'}...")
     
