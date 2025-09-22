@@ -373,10 +373,13 @@ class FreshlyBot:
             id='daily_check'
         )
     
-    async def run(self):
-        """Асинхронный запуск бота"""
-        # Создаем Application
-        self.application = Application.builder().token(self.token).build()
+   def run(self):
+    self.application.run_polling()  # <-- Просто вызовите его как обычный метод
+
+# ...
+if __name__ == '__main__':
+    bot = YourBotClass()
+    bot.run()  # <-- Без asyncio.run()
         
         # Настраиваем обработчики
         self.setup_handlers()
