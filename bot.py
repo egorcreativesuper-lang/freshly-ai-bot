@@ -234,6 +234,23 @@ class FreshlyBot:
         else:
             await update.message.reply_text(text)
 
+        # Возвращаем главное меню
+        await self.show_main_menu(update, context)
+
+    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показать главное меню с кнопками"""
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
+            [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
+            [InlineKeyboardButton("🗑️ Очистить всё", callback_data="clear_products")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if update.callback_query:
+            await update.callback_query.message.reply_text("🎯 Выберите действие:", reply_markup=reply_markup)
+        else:
+            await update.message.reply_text("🎯 Выберите действие:", reply_markup=reply_markup)
+
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало добавления продукта"""
         user = update.effective_user
@@ -245,6 +262,7 @@ class FreshlyBot:
                 await update.callback_query.edit_message_text(text)
             else:
                 await update.message.reply_text(text)
+            await self.show_main_menu(update, context)
             return ConversationHandler.END
 
         products_list = "\n".join([f"• {product}" for product in PRODUCTS_DATA.keys()])
@@ -292,6 +310,7 @@ class FreshlyBot:
 
         if callback_data == "cancel":
             await query.edit_message_text("❌ Операция отменена.")
+            await self.show_main_menu(update, context)
             return ConversationHandler.END
 
         if callback_data == "back_to_product":
@@ -321,18 +340,23 @@ class FreshlyBot:
                 expiration_date = purchase_date + timedelta(days=shelf_life)
                 days_left = (expiration_date.date() - datetime.now().date()).days
 
-                await query.edit_message_text(
-                    f"✅ **{product_name}** добавлен!\n"
-                    f"📅 Срок годности: {expiration_date.strftime('%d.%m.%Y')}\n"
-                    f"⏳ Осталось дней: {days_left}"
-                )
+                message = f"✅ **{product_name}** добавлен!\n"
+                message += f"📅 Срок годности: {expiration_date.strftime('%d.%m.%Y')}\n"
+                message += f"⏳ Осталось дней: {days_left}"
+
+                await query.edit_message_text(message)
+
+                # Возвращаемся в главное меню
+                await self.show_main_menu(update, context)
+
+                return ConversationHandler.END
             else:
                 await query.edit_message_text("❌ Ошибка при добавлении продукта.")
 
         except Exception as e:
             logger.error(f"Ошибка: {e}")
             await query.edit_message_text("❌ Произошла ошибка. Попробуйте снова.")
-            return ConversationHandler.END
+            return WAITING_DATE
 
         return ConversationHandler.END
 
@@ -359,8 +383,9 @@ class FreshlyBot:
         return WAITING_DATE
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Отмена текущей операции"""
+        """Отмена текущей операции — возврат в главное меню"""
         await update.message.reply_text("❌ Операция отменена.")
+        await self.show_main_menu(update, context)
         return ConversationHandler.END
 
     async def check_expiring_products(self):
