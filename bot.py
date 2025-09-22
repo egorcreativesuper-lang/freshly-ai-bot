@@ -167,7 +167,7 @@ class FreshlyBot:
 🎯 Нажми на кнопку ниже, чтобы начать!
         """
 
-        # Кнопки с эмодзи
+        # Главное меню с эмодзи
         keyboard = [
             [KeyboardButton("➕ Добавить"), KeyboardButton("📋 Список")],
             [KeyboardButton("🗑️ Очистить")]
@@ -253,10 +253,11 @@ class FreshlyBot:
 
         context.user_data['current_product'] = product_name
 
-        # Кнопки для выбора даты — с эмодзи!
+        # Кнопки для выбора даты — с эмодзи и кнопкой НАЗАД
         keyboard = [
             [KeyboardButton("📅 Сегодня"), KeyboardButton("⏪ Вчера")],
-            [KeyboardButton("⏪ 2 дня назад"), KeyboardButton("❌ Отмена")]
+            [KeyboardButton("⏪ 2 дня назад")],
+            [KeyboardButton("⬅️ Назад"), KeyboardButton("❌ Отмена")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -277,6 +278,10 @@ class FreshlyBot:
         if user_input == "❌ Отмена":
             await update.message.reply_text("❌ Операция отменена.")
             return ConversationHandler.END
+
+        if user_input == "⬅️ Назад":
+            await update.message.reply_text("📝 Введите название продукта:")
+            return WAITING_PRODUCT  # Возврат к предыдущему шагу
 
         try:
             if user_input == "📅 Сегодня":
@@ -317,6 +322,11 @@ class FreshlyBot:
         await update.message.reply_text("❌ Операция отменена.")
         return ConversationHandler.END
 
+    async def go_back(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Обработчик кнопки 'Назад' — возврат к вводу продукта"""
+        await update.message.reply_text("📝 Введите название продукта:")
+        return WAITING_PRODUCT
+
     async def check_expiring_products(self):
         """Проверка продуктов с истекающим сроком"""
         try:
@@ -351,33 +361,43 @@ class FreshlyBot:
     def setup_handlers(self):
         """Настройка обработчиков команд и текстовых кнопок"""
 
-        # Обработчики для текстовых кнопок
-        add_button_handler = MessageHandler(filters.Text(["➕ Добавить"]), self.add_product_start)
+        # Обработчики кнопок вне диалога
         list_button_handler = MessageHandler(filters.Text(["📋 Список"]), self.list_products)
         clear_button_handler = MessageHandler(filters.Text(["🗑️ Очистить"]), self.clear_products)
+
+        # Обработчик кнопки "Назад" — для fallback
+        back_button_handler = MessageHandler(filters.Text(["⬅️ Назад"]), self.go_back)
 
         # ConversationHandler для добавления продукта
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('add', self.add_product_start),
-                add_button_handler  # ← Кнопка тоже запускает добавление
+                MessageHandler(filters.Text(["➕ Добавить"]), self.add_product_start)
             ],
             states={
-                WAITING_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)],
-                WAITING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_date)]
+                WAITING_PRODUCT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)
+                ],
+                WAITING_DATE: [
+                    MessageHandler(filters.Text(["📅 Сегодня", "⏪ Вчера", "⏪ 2 дня назад"]), self.handle_date),
+                    back_button_handler,  # ← Кнопка "Назад" внутри диалога
+                    MessageHandler(filters.Text(["❌ Отмена"]), self.cancel)
+                ]
             },
-            fallbacks=[CommandHandler('cancel', self.cancel)]
+            # fallbacks — чтобы кнопки "Список", "Очистить", "Отмена" работали даже внутри диалога
+            fallbacks=[
+                MessageHandler(filters.Text(["📋 Список"]), self.list_products),
+                MessageHandler(filters.Text(["🗑️ Очистить"]), self.clear_products),
+                CommandHandler('cancel', self.cancel),
+                MessageHandler(filters.Text(["❌ Отмена"]), self.cancel),
+                back_button_handler  # на всякий случай
+            ]
         )
 
         # Регистрируем обработчики
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("list", self.list_products))
         self.application.add_handler(CommandHandler("clear", self.clear_products))
-
-        # Добавляем обработчики кнопок
-        self.application.add_handler(list_button_handler)
-        self.application.add_handler(clear_button_handler)
-
         self.application.add_handler(conv_handler)
 
     def setup_scheduler(self):
