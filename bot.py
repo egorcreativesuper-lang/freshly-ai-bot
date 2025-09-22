@@ -1,16 +1,14 @@
 import logging
+import sqlite3
+import json
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     filters, ContextTypes, ConversationHandler
 )
-from datetime import datetime, timedelta
-from PIL import Image
-import io
-
-from config import BOT_TOKEN, FREE_PRODUCT_LIMIT, STATUS_COLORS
-from database import Database
-from scheduler import NotificationScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,10 +20,214 @@ logger = logging.getLogger(__name__)
 # Состояния для ConversationHandler
 WAITING_PHOTO, WAITING_DATE = range(2)
 
+class Database:
+    def __init__(self):
+        self.init_db()
+        self.load_products_data()
+        self.load_recipes_data()
+    
+    def init_db(self):
+        """Инициализация базы данных"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    premium INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    product_name TEXT,
+                    purchase_date DATE,
+                    expiration_date DATE,
+                    notified INTEGER DEFAULT 0,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+            ''')
+            conn.commit()
+    
+    def load_products_data(self):
+        """Загрузка данных о продуктах"""
+        products = {
+            "молоко": {"shelf_life": 7, "category": "молочные"},
+            "кефир": {"shelf_life": 5, "category": "молочные"},
+            "сыр": {"shelf_life": 14, "category": "молочные"},
+            "творог": {"shelf_life": 5, "category": "молочные"},
+            "сметана": {"shelf_life": 7, "category": "молочные"},
+            "йогурт": {"shelf_life": 10, "category": "молочные"},
+            "яйца": {"shelf_life": 30, "category": "яйца"},
+            "курица": {"shelf_life": 3, "category": "мясо"},
+            "говядина": {"shelf_life": 4, "category": "мясо"},
+            "свинина": {"shelf_life": 4, "category": "мясо"},
+            "рыба": {"shelf_life": 2, "category": "рыба"},
+            "хлеб": {"shelf_life": 5, "category": "хлеб"}
+        }
+        self.products_data = products
+    
+    def load_recipes_data(self):
+        """Загрузка данных о рецептах"""
+        recipes = {
+            "молочные": [
+                {
+                    "name": "Сырники",
+                    "ingredients": ["творог 500г", "яйцо 2шт", "мука 4ст.л", "сахар 2ст.л"],
+                    "steps": ["Смешать творог с яйцами", "Добавить муку и сахар", "Жарить на сковороде"],
+                    "time": "30 мин",
+                    "portions": 4
+                }
+            ],
+            "мясо": [
+                {
+                    "name": "Курица с овощами",
+                    "ingredients": ["курица 500г", "овощи 300г", "специи"],
+                    "steps": ["Обжарить курицу", "Добавить овощи", "Тушить 20 мин"],
+                    "time": "40 мин",
+                    "portions": 3
+                }
+            ]
+        }
+        self.recipes_data = recipes
+    
+    def add_user(self, user_id, username):
+        """Добавление пользователя"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO users (user_id, username) 
+                VALUES (?, ?)
+            ''', (user_id, username))
+            conn.commit()
+    
+    def add_product(self, user_id, product_name, purchase_date):
+        """Добавление продукта"""
+        if product_name not in self.products_data:
+            return False
+        
+        shelf_life = self.products_data[product_name]['shelf_life']
+        expiration_date = purchase_date + timedelta(days=shelf_life)
+        
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO products (user_id, product_name, purchase_date, expiration_date)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, product_name, purchase_date.date(), expiration_date.date()))
+            conn.commit()
+        
+        return True
+    
+    def get_user_products(self, user_id):
+        """Получение продуктов пользователя"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT product_name, purchase_date, expiration_date 
+                FROM products 
+                WHERE user_id = ? 
+                ORDER BY expiration_date
+            ''', (user_id,))
+            return cursor.fetchall()
+    
+    def get_products_count(self, user_id):
+        """Получение количества продуктов пользователя"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = ?', (user_id,))
+            return cursor.fetchone()[0]
+    
+    def clear_user_products(self, user_id):
+        """Очистка продуктов пользователя"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
+            conn.commit()
+    
+    def get_expiring_products(self):
+        """Получение продуктов, срок которых истекает завтра"""
+        tomorrow = (datetime.now() + timedelta(days=1)).date()
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT p.user_id, u.username, p.product_name, p.expiration_date
+                FROM products p
+                JOIN users u ON p.user_id = u.user_id
+                WHERE p.expiration_date = ? AND p.notified = 0
+            ''', (tomorrow,))
+            return cursor.fetchall()
+    
+    def mark_as_notified(self, user_id, product_name):
+        """Пометить продукт как уведомленный"""
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE products 
+                SET notified = 1 
+                WHERE user_id = ? AND product_name = ?
+            ''', (user_id, product_name))
+            conn.commit()
+    
+    def get_recipes_by_category(self, category):
+        """Получение рецептов по категории"""
+        return self.recipes_data.get(category, [])
+    
+    def get_product_category(self, product_name):
+        """Получение категории продукта"""
+        if product_name in self.products_data:
+            return self.products_data[product_name]['category']
+        return None
+
 class FreshlyBot:
     def __init__(self):
         self.db = Database()
         self.application = None
+        self.setup_scheduler()
+    
+    def setup_scheduler(self):
+        """Настройка планировщика уведомлений"""
+        self.scheduler = BackgroundScheduler()
+        self.scheduler.add_job(
+            self.check_expiring_products,
+            trigger=CronTrigger(hour=10, minute=0),
+            id='daily_check'
+        )
+    
+    def check_expiring_products(self):
+        """Проверка продуктов с истекающим сроком"""
+        try:
+            expiring_products = self.db.get_expiring_products()
+            
+            for user_id, username, product_name, expiration_date in expiring_products:
+                try:
+                    category = self.db.get_product_category(product_name)
+                    recipes = self.db.get_recipes_by_category(category)
+                    
+                    message = f"⚠️ Твой {product_name} испортится завтра!\n"
+                    
+                    if recipes:
+                        recipe = recipes[0]
+                        message += f"🍳 Попробуй {recipe['name']}!\n"
+                        message += f"⏱ Время: {recipe['time']}\n"
+                        message += f"🍽 Порции: {recipe['portions']}"
+                    
+                    # Отправка уведомления через бота
+                    if self.application:
+                        self.application.bot.send_message(
+                            chat_id=user_id,
+                            text=message
+                        )
+                    
+                    self.db.mark_as_notified(user_id, product_name)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка проверки продуктов: {e}")
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -40,12 +242,6 @@ class FreshlyBot:
 2. Укажи дату покупки
 3. Получай уведомления перед истечением срока
 
-🍳 **Что я умею:**
-• Распознавать продукты (пока заглушка)
-• Отслеживать сроки годности
-• Напоминать за 1 день до истечения
-• Предлагать рецепты
-
 📋 **Команды:**
 /start - показать это сообщение
 /list - список ваших продуктов
@@ -56,7 +252,7 @@ class FreshlyBot:
         
         keyboard = [
             [KeyboardButton("📸 Сфотографировать продукт")],
-            [KeyboardButton("📋 Мои продукты"), KeyboardButton("⚙️ Настройки")]
+            [KeyboardButton("📋 Мои продукты")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
@@ -67,21 +263,18 @@ class FreshlyBot:
         user = update.effective_user
         
         # Проверка лимита для бесплатной версии
-        if self.db.get_products_count(user.id) >= FREE_PRODUCT_LIMIT:
+        if self.db.get_products_count(user.id) >= 5:
             await update.message.reply_text(
-                f"❌ Вы достигли лимита бесплатной версии ({FREE_PRODUCT_LIMIT} продуктов). "
-                "Удалите старые продукты или приобретите премиум-версию."
+                "❌ Вы достигли лимита бесплатной версии (5 продуктов). "
+                "Удалите старые продукты командой /clear"
             )
             return ConversationHandler.END
         
         # Заглушка для распознавания продукта
-        # В будущем можно добавить ML-модель
-        product_name = "молоко"  # Заглушка
-        
+        product_name = "молоко"
         context.user_data['current_product'] = product_name
         
         # Предлагаем выбрать дату покупки
-        today = datetime.now().date()
         keyboard = [
             [
                 KeyboardButton("Сегодня"),
@@ -115,10 +308,8 @@ class FreshlyBot:
             elif user_input == "Позавчера":
                 purchase_date = datetime.now() - timedelta(days=2)
             else:
-                # Парсим дату из формата ДД.ММ.ГГГГ
                 purchase_date = datetime.strptime(user_input, '%d.%m.%Y')
             
-            # Добавляем продукт в базу
             success = self.db.add_product(user.id, product_name, purchase_date)
             
             if success:
@@ -129,8 +320,7 @@ class FreshlyBot:
                     f"✅ Продукт добавлен!\n"
                     f"📦 **{product_name}**\n"
                     f"📅 Срок годности до: {expiration_date.strftime('%d.%m.%Y')}\n"
-                    f"⏳ Осталось дней: {(expiration_date.date() - datetime.now().date()).days}",
-                    parse_mode='Markdown'
+                    f"⏳ Осталось дней: {(expiration_date.date() - datetime.now().date()).days}"
                 )
             else:
                 await update.message.reply_text("❌ Ошибка добавления продукта")
@@ -155,30 +345,25 @@ class FreshlyBot:
         for product_name, purchase_date, expiration_date in products:
             days_left = (expiration_date - datetime.now().date()).days
             
-            # Определяем статус
             if days_left < 0:
-                status = STATUS_COLORS['expired']
+                status = "🔴"
                 status_text = "ПРОСРОЧЕНО"
             elif days_left == 0:
-                status = STATUS_COLORS['today']
+                status = "🔴"
                 status_text = "Истекает сегодня"
             elif days_left == 1:
-                status = STATUS_COLORS['tomorrow']
+                status = "🟠"
                 status_text = "Истекает завтра"
             elif days_left <= 3:
-                status = STATUS_COLORS['2-3_days']
+                status = "🟡"
                 status_text = f"Истекает через {days_left} дня"
             else:
-                status = STATUS_COLORS['safe']
+                status = "🟢"
                 status_text = f"Осталось {days_left} дней"
             
             message += f"{status} **{product_name}**\n"
-            message += f"   📅 До {expiration_date.strftime('%d.%m.%Y')}\n"
+            message += f"   📅 До {expiration_date}\n"
             message += f"   ⏰ {status_text}\n\n"
-        
-        # Добавляем информацию о лимите
-        products_count = self.db.get_products_count(user.id)
-        message += f"📊 Использовано: {products_count}/{FREE_PRODUCT_LIMIT}"
         
         await update.message.reply_text(message, parse_mode='Markdown')
     
@@ -220,13 +405,18 @@ class FreshlyBot:
     
     def run(self):
         """Запуск бота"""
+        # Получаем токен из переменных окружения
+        BOT_TOKEN = os.getenv('BOT_TOKEN')
+        if not BOT_TOKEN:
+            logger.error("Токен бота не найден! Установите переменную BOT_TOKEN")
+            return
+        
         self.application = Application.builder().token(BOT_TOKEN).build()
         
         # Настройка обработчиков
         self.setup_handlers()
         
         # Запуск планировщика уведомлений
-        self.scheduler = NotificationScheduler(self.application.bot)
         self.scheduler.start()
         
         # Запуск бота
