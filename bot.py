@@ -164,12 +164,13 @@ class FreshlyBot:
 /add - добавить продукт
 /clear - очистить все продукты
 
-🎯 Начни с добавления первого продукта командой /add!
+🎯 Нажми на кнопку ниже, чтобы начать!
         """
 
+        # Кнопки с эмодзи
         keyboard = [
-            [KeyboardButton("/add"), KeyboardButton("/list")],
-            [KeyboardButton("/clear")]
+            [KeyboardButton("➕ Добавить"), KeyboardButton("📋 Список")],
+            [KeyboardButton("🗑️ Очистить")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -228,7 +229,7 @@ class FreshlyBot:
         products_count = await self.db.get_products_count(user.id)
         if products_count >= 5:
             await update.message.reply_text(
-                "❌ Вы достигли лимита (5 продуктов). Используйте /clear чтобы очистить список."
+                "❌ Вы достигли лимита (5 продуктов). Используйте 🗑️ Очистить чтобы освободить место."
             )
             return ConversationHandler.END
 
@@ -252,16 +253,16 @@ class FreshlyBot:
 
         context.user_data['current_product'] = product_name
 
-        # Кнопки для выбора даты
+        # Кнопки для выбора даты — с эмодзи!
         keyboard = [
-            [KeyboardButton("Сегодня"), KeyboardButton("Вчера")],
-            [KeyboardButton("2 дня назад"), KeyboardButton("Отмена")]
+            [KeyboardButton("📅 Сегодня"), KeyboardButton("⏪ Вчера")],
+            [KeyboardButton("⏪ 2 дня назад"), KeyboardButton("❌ Отмена")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
         await update.message.reply_text(
             f"📦 Продукт: **{product_name}**\n"
-            "📅 Когда вы купили этот продукт?",
+            "📆 Когда вы купили этот продукт?",
             reply_markup=reply_markup
         )
 
@@ -273,16 +274,16 @@ class FreshlyBot:
         product_name = context.user_data.get('current_product')
         user = update.effective_user
 
-        if user_input == "Отмена":
+        if user_input == "❌ Отмена":
             await update.message.reply_text("❌ Операция отменена.")
             return ConversationHandler.END
 
         try:
-            if user_input == "Сегодня":
+            if user_input == "📅 Сегодня":
                 purchase_date = datetime.now()
-            elif user_input == "Вчера":
+            elif user_input == "⏪ Вчера":
                 purchase_date = datetime.now() - timedelta(days=1)
-            elif user_input == "2 дня назад":
+            elif user_input == "⏪ 2 дня назад":
                 purchase_date = datetime.now() - timedelta(days=2)
             else:
                 await update.message.reply_text("❌ Пожалуйста, выберите дату из кнопок")
@@ -348,10 +349,19 @@ class FreshlyBot:
             logger.error(f"Ошибка проверки продуктов: {e}")
 
     def setup_handlers(self):
-        """Настройка обработчиков команд"""
+        """Настройка обработчиков команд и текстовых кнопок"""
+
+        # Обработчики для текстовых кнопок
+        add_button_handler = MessageHandler(filters.Text(["➕ Добавить"]), self.add_product_start)
+        list_button_handler = MessageHandler(filters.Text(["📋 Список"]), self.list_products)
+        clear_button_handler = MessageHandler(filters.Text(["🗑️ Очистить"]), self.clear_products)
+
         # ConversationHandler для добавления продукта
         conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('add', self.add_product_start)],
+            entry_points=[
+                CommandHandler('add', self.add_product_start),
+                add_button_handler  # ← Кнопка тоже запускает добавление
+            ],
             states={
                 WAITING_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)],
                 WAITING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_date)]
@@ -363,6 +373,11 @@ class FreshlyBot:
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("list", self.list_products))
         self.application.add_handler(CommandHandler("clear", self.clear_products))
+
+        # Добавляем обработчики кнопок
+        self.application.add_handler(list_button_handler)
+        self.application.add_handler(clear_button_handler)
+
         self.application.add_handler(conv_handler)
 
     def setup_scheduler(self):
@@ -380,7 +395,7 @@ class FreshlyBot:
         self.setup_handlers()    # Настраиваем хендлеры
         self.setup_scheduler()   # Настраиваем планировщик
         self.scheduler.start()   # Запускаем планировщик
-        logger.info("Бот запускается...")
+        logger.info("🚀 Бот запускается...")
         self.application.run_polling()  # ← Главный цикл бота
 
 
