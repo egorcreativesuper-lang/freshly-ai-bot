@@ -4,6 +4,8 @@ import sqlite3
 import asyncio
 import shutil
 import re
+import signal
+import sys
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from functools import lru_cache
@@ -15,7 +17,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, ConversationHandler, filters
 )
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden, BadRequest, Conflict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -122,7 +124,7 @@ class Database:
     def get_connection(self):
         """Контекстный менеджер для соединения с БД"""
         conn = sqlite3.connect(Config.DATABASE_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row  # Для доступа к колонкам по имени
+        conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception as e:
@@ -173,13 +175,6 @@ class Database:
             backup_path = os.path.join(Config.BACKUP_DIR, backup_name)
             shutil.copy2(Config.DATABASE_PATH, backup_path)
             logger.info(f"Создан бэкап базы данных: {backup_path}")
-            
-            # Удаляем старые бэкапы (оставляем последние 10)
-            backups = sorted([f for f in os.listdir(Config.BACKUP_DIR) if f.startswith('backup_')])
-            if len(backups) > 10:
-                for old_backup in backups[:-10]:
-                    os.remove(os.path.join(Config.BACKUP_DIR, old_backup))
-                    
         except Exception as e:
             logger.error(f"Ошибка создания бэкапа: {e}")
 
@@ -194,9 +189,7 @@ class Database:
             conn.commit()
 
     async def add_product(self, user_id: int, product_name: str, purchase_date: datetime) -> bool:
-        """Добавление продукта с логированием"""
-        logger.info(f"Добавление продукта: user={user_id}, product={product_name}, date={purchase_date}")
-        
+        """Добавление продукта"""
         products_data = ProductManager.get_products_data()
         if product_name not in products_data:
             return False
@@ -239,7 +232,6 @@ class Database:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
             conn.commit()
-        logger.info(f"Очищены продукты пользователя: {user_id}")
 
     async def get_expiring_products(self):
         """Получение продуктов с истекающим сроком"""
@@ -265,18 +257,6 @@ class Database:
             ''', (user_id, product_name))
             conn.commit()
 
-    async def remove_expired_products(self):
-        """Удаление просроченных продуктов (старше 7 дней)"""
-        week_ago = (datetime.now() - timedelta(days=7)).date()
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM products WHERE expiration_date < ?', (week_ago,))
-            deleted_count = cursor.rowcount
-            conn.commit()
-            
-        if deleted_count > 0:
-            logger.info(f"Удалено просроченных продуктов: {deleted_count}")
-
 class FreshlyBot:
     def __init__(self, token: str):
         self.token = token
@@ -284,6 +264,21 @@ class FreshlyBot:
         self.product_manager = ProductManager()
         self.application: Application = None
         self.scheduler = AsyncIOScheduler()
+        self._shutdown = False
+
+    def setup_signal_handlers(self):
+        """Настройка обработчиков сигналов для graceful shutdown"""
+        def signal_handler(signum, frame):
+            logger.info(f"Получен сигнал {signum}, завершение работы...")
+            self._shutdown = True
+            if self.application:
+                self.application.stop()
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start"""
@@ -302,13 +297,6 @@ class FreshlyBot:
             "🎯 Начни с кнопки *➕ Добавить продукт*!"
         )
 
-        await self._send_welcome_message(update, welcome_text)
-
-    async def _send_welcome_message(self, update: Update, text: str):
-        """Отправка приветственного сообщения с медиа"""
-        animation_url = "https://i.imgur.com/6JQV9Xj.gif"
-        fallback_image_url = "https://i.imgur.com/8Y0fKuB.png"
-
         keyboard = [
             [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
             [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
@@ -317,52 +305,10 @@ class FreshlyBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        try:
-            if hasattr(update, 'message') and update.message:
-                await update.message.reply_animation(
-                    animation=animation_url,
-                    caption=text,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-            else:
-                await update.callback_query.message.reply_animation(
-                    animation=animation_url,
-                    caption=text,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-        except Exception as e:
-            logger.warning(f"Не удалось отправить анимацию: {e}")
-            try:
-                if hasattr(update, 'message') and update.message:
-                    await update.message.reply_photo(
-                        photo=fallback_image_url,
-                        caption=text,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-                else:
-                    await update.callback_query.message.reply_photo(
-                        photo=fallback_image_url,
-                        caption=text,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-            except Exception as e2:
-                logger.error(f"Не удалось отправить фото: {e2}")
-                if hasattr(update, 'message') and update.message:
-                    await update.message.reply_text(
-                        text,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-                else:
-                    await update.callback_query.message.reply_text(
-                        text,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
+        if update.message:
+            await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_markup)
+        else:
+            await update.callback_query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=reply_markup)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Команда помощи"""
@@ -387,10 +333,11 @@ class FreshlyBot:
         else:
             await update.callback_query.edit_message_text(help_text, parse_mode="Markdown", reply_markup=reply_markup)
 
-    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Главное меню"""
-        text = "🎯 Выберите действие:"
+    async def show_main_menu_with_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Главное меню с фото холодильника"""
+        image_url = "https://i.imgur.com/OjC80T8.jpeg"  # Ваша картинка
 
+        text = "🎯 Выберите действие:"
         keyboard = [
             [InlineKeyboardButton("➕ Добавить продукт", callback_data="add_product")],
             [InlineKeyboardButton("📋 Показать список", callback_data="list_products")],
@@ -399,10 +346,26 @@ class FreshlyBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await self._edit_or_reply(update, text, reply_markup)
+        try:
+            if update.callback_query:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить фото: {e}")
+            await self._edit_or_reply(update, text, reply_markup)
 
     async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Показать список продуктов"""
+        """Показать список продуктов с кнопкой 'Назад в меню' — исправленная версия"""
         user = update.effective_user
         products = await self.db.get_user_products(user.id)
 
@@ -413,7 +376,6 @@ class FreshlyBot:
             today = datetime.now().date()
             
             for product_name, purchase_date, expiration_date in products:
-                # Преобразуем строки в даты, если необходимо
                 if isinstance(purchase_date, str):
                     purchase_date = datetime.strptime(purchase_date, "%Y-%m-%d").date()
                 if isinstance(expiration_date, str):
@@ -432,7 +394,23 @@ class FreshlyBot:
         keyboard = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await self._edit_or_reply(update, text, reply_markup)
+        try:
+            if update.callback_query:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при отображении списка: {e}")
+            await self._edit_or_reply(update, text, reply_markup)
 
     def _get_expiration_status(self, days_left: int) -> tuple:
         """Получить статус и текст для срока годности"""
@@ -454,32 +432,27 @@ class FreshlyBot:
 
         await self._edit_or_reply(update, "✅ Все продукты удалены!")
         await asyncio.sleep(1)
-        await self.show_main_menu(update, context)
+        await self.show_main_menu_with_photo(update, context)
 
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало добавления продукта"""
         user = update.effective_user
         
-        # Проверка лимита продуктов
         if await self.db.get_products_count(user.id) >= Config.MAX_PRODUCTS:
-            await self._edit_or_reply(update, 
-                f"❌ Лимит {Config.MAX_PRODUCTS} продуктов. Очистите список.")
+            await self._edit_or_reply(update, f"❌ Лимит {Config.MAX_PRODUCTS} продуктов. Очистите список.")
             await asyncio.sleep(2)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
-        # Создание клавиатуры с продуктами по категориям
         keyboard = []
         categories = self.product_manager.get_product_categories()
         
         for category in sorted(categories):
             category_products = self.product_manager.get_products_by_category(category)
             if category_products:
-                # Добавляем заголовок категории
                 keyboard.append([InlineKeyboardButton(
                     f"📁 {category.capitalize()}", callback_data=f"category_{category}")])
                 
-                # Добавляем продукты категории (по 2 в ряд)
                 for i in range(0, len(category_products), 2):
                     row = []
                     for j in range(2):
@@ -491,9 +464,8 @@ class FreshlyBot:
                             ))
                     if row:
                         keyboard.append(row)
-                keyboard.append([])  # Пустая строка между категориями
+                keyboard.append([])
         
-        # Удаляем последнюю пустую строку если есть
         if keyboard and not keyboard[-1]:
             keyboard.pop()
             
@@ -508,25 +480,16 @@ class FreshlyBot:
         try:
             date_str = update.message.text.strip()
             
-            # Проверка формата даты
             if not re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', date_str):
                 await update.message.reply_text("❌ Неверный формат! Используйте ДД.ММ.ГГГГ")
                 return WAITING_CUSTOM_DATE
             
-            # Парсинг даты
             purchase_date = datetime.strptime(date_str, "%d.%m.%Y")
             
-            # Проверка что дата не в будущем
             if purchase_date.date() > datetime.now().date():
                 await update.message.reply_text("❌ Дата не может быть в будущем!")
                 return WAITING_CUSTOM_DATE
             
-            # Проверка что дата не слишком старая (больше года назад)
-            if purchase_date.date() < (datetime.now() - timedelta(days=365)).date():
-                await update.message.reply_text("❌ Дата не может быть больше года назад!")
-                return WAITING_CUSTOM_DATE
-            
-            # Добавление продукта
             product_name = context.user_data.get('current_product')
             if not product_name:
                 await update.message.reply_text("❌ Ошибка: продукт не выбран.")
@@ -546,7 +509,7 @@ class FreshlyBot:
             
             await update.message.reply_text(msg, parse_mode="Markdown")
             await asyncio.sleep(2)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             
         except ValueError:
             await update.message.reply_text("❌ Неверная дата! Проверьте правильность ввода.")
@@ -559,9 +522,8 @@ class FreshlyBot:
         query = update.callback_query
         await query.answer()
 
-        # Обработка основных команд меню
         if query.data == "back_to_menu":
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
         elif query.data == "clear_products":
@@ -579,11 +541,10 @@ class FreshlyBot:
         elif query.data == "cancel":
             await query.edit_message_text("❌ Операция отменена.")
             await asyncio.sleep(1)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
         elif query.data.startswith("category_"):
-            # Показываем продукты конкретной категории
             category = query.data[9:]
             products = self.product_manager.get_products_by_category(category)
             
@@ -616,7 +577,6 @@ class FreshlyBot:
             product_name = query.data[8:]
             context.user_data['current_product'] = product_name
 
-            # Клавиатура выбора даты
             keyboard = [
                 [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
                 [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
@@ -653,10 +613,9 @@ class FreshlyBot:
             if not product_name:
                 await query.edit_message_text("❌ Ошибка: продукт не выбран.")
                 await asyncio.sleep(1)
-                await self.show_main_menu(update, context)
+                await self.show_main_menu_with_photo(update, context)
                 return ConversationHandler.END
 
-            # Определяем дату покупки
             if query.data == "today":
                 purchase_date = datetime.now()
             elif query.data == "yesterday":
@@ -678,7 +637,7 @@ class FreshlyBot:
 
             await query.edit_message_text(msg, parse_mode="Markdown")
             await asyncio.sleep(2)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
         elif query.data == "add_product":
@@ -687,7 +646,7 @@ class FreshlyBot:
         else:
             await query.edit_message_text("❓ Неизвестная команда.")
             await asyncio.sleep(1)
-            await self.show_main_menu(update, context)
+            await self.show_main_menu_with_photo(update, context)
             return ConversationHandler.END
 
     async def _edit_or_reply(self, update: Update, text: str, reply_markup=None) -> None:
@@ -701,16 +660,19 @@ class FreshlyBot:
                 await update.message.reply_text(
                     text, reply_markup=reply_markup, parse_mode="Markdown"
                 )
-        except Exception as e:
+        except (BadRequest, Exception) as e:
             logger.warning(f"Не удалось отредактировать: {e}")
-            if hasattr(update, 'callback_query') and update.callback_query:
-                await update.callback_query.message.reply_text(
-                    text, reply_markup=reply_markup, parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text(
-                    text, reply_markup=reply_markup, parse_mode="Markdown"
-                )
+            try:
+                if hasattr(update, 'callback_query') and update.callback_query:
+                    await update.callback_query.message.reply_text(
+                        text, reply_markup=reply_markup, parse_mode="Markdown"
+                    )
+                else:
+                    await update.message.reply_text(
+                        text, reply_markup=reply_markup, parse_mode="Markdown"
+                    )
+            except Exception as e2:
+                logger.error(f"Не удалось отправить сообщение: {e2}")
 
     async def check_expiring_products(self):
         """Проверка и уведомление о скоропортящихся продуктах"""
@@ -718,10 +680,8 @@ class FreshlyBot:
             expiring = await self.db.get_expiring_products()
             for user_id, _, first_name, product_name, _ in expiring:
                 try:
-                    # Проверяем, что пользователь не заблокировал бота
                     await self.application.bot.send_chat_action(user_id, "typing")
                     
-                    # Формируем сообщение с советом
                     category = self.product_manager.get_products_data()[product_name]['category']
                     tip = self.product_manager.get_product_tips().get(category, "Используйте его сегодня!")
                     
@@ -732,34 +692,16 @@ class FreshlyBot:
                     await self.application.bot.send_message(user_id, msg, parse_mode="Markdown")
                     await self.db.mark_as_notified(user_id, product_name)
                     
-                    logger.info(f"Отправлено уведомление пользователю {user_id} о продукте {product_name}")
-                    
                 except Forbidden:
                     logger.info(f"Пользователь {user_id} заблокировал бота")
-                except BadRequest as e:
-                    logger.error(f"Ошибка запроса для {user_id}: {e}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления {user_id}: {e}")
                     
         except Exception as e:
-            logger.error(f"Критическая ошибка проверки продуктов: {e}")
-
-    async def cleanup_task(self):
-        """Задача очистки устаревших данных"""
-        try:
-            # Удаляем просроченные продукты
-            await self.db.remove_expired_products()
-            
-            # Создаем бэкап базы данных
-            await self.db.backup_database()
-            
-            logger.info("Задача очистки выполнена успешно")
-        except Exception as e:
-            logger.error(f"Ошибка в задаче очистки: {e}")
+            logger.error(f"Ошибка проверки продуктов: {e}")
 
     def setup_handlers(self):
         """Настройка обработчиков команд"""
-        # Conversation handler для добавления продуктов
         conv_handler = ConversationHandler(
             entry_points=[
                 CallbackQueryHandler(self.button_handler, pattern="^add_product$"),
@@ -784,39 +726,30 @@ class FreshlyBot:
             allow_reentry=True
         )
 
-        # Обработчики основных команд
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("list", self.list_products))
         self.application.add_handler(CommandHandler("clear", self.clear_products))
         
-        # Обработчик кнопок главного меню
         self.application.add_handler(CallbackQueryHandler(
             self.button_handler, 
             pattern=r"^(back_to_menu|list_products|clear_products|help|add_product)$"
         ))
         
-        # Добавляем conversation handler последним
         self.application.add_handler(conv_handler)
 
     def setup_scheduler(self):
         """Настройка планировщика задач"""
-        # Ежедневная проверка продуктов
         self.scheduler.add_job(
             self.check_expiring_products, 
             CronTrigger(hour=Config.NOTIFICATION_HOUR, minute=Config.NOTIFICATION_MINUTE),
             id='daily_check'
         )
-        
-        # Еженедельная очистка (каждое воскресенье в 3:00)
-        self.scheduler.add_job(
-            self.cleanup_task,
-            CronTrigger(day_of_week=0, hour=3, minute=0),
-            id='weekly_cleanup'
-        )
 
     def run(self):
-        """Запуск бота"""
+        """Запуск бота с обработкой конфликтов"""
+        self.setup_signal_handlers()
+        
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         self.setup_scheduler()
@@ -825,24 +758,45 @@ class FreshlyBot:
         logger.info("🚀 Бот запущен")
         
         try:
-            self.application.run_polling()
-        except KeyboardInterrupt:
-            logger.info("⏹️ Бот остановлен")
+            self.application.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                close_loop=False
+            )
+        except Conflict as e:
+            logger.error(f"Конфликт: {e}")
+            logger.info("⚠️  Возможно, уже запущен другой экземпляр бота")
+        except Exception as e:
+            logger.error(f"Ошибка запуска: {e}")
         finally:
-            self.scheduler.shutdown()
-
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+            logger.info("⏹️ Бот остановлен")
 
 def main():
     """Основная функция"""
+    if os.name == 'posix':
+        os.system('pkill -f "python.*bot.py" 2>/dev/null')
+        os.system('pkill -f "python.*freshly" 2>/dev/null')
+    
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     if not BOT_TOKEN:
         logger.error("❌ Установите переменную окружения TELEGRAM_BOT_TOKEN")
         return
     
-    # Создаем и запускаем бота
+    try:
+        import psutil
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if proc.info['cmdline'] and any('bot.py' in cmd for cmd in proc.info['cmdline']):
+                if proc.info['pid'] != os.getpid():
+                    logger.info(f"⚠️ Найден запущенный процесс бота (PID: {proc.info['pid']}), завершаем...")
+                    proc.terminate()
+                    proc.wait(timeout=5)
+    except (ImportError, psutil.NoSuchProcess, psutil.TimeoutExpired):
+        pass
+    
     bot = FreshlyBot(BOT_TOKEN)
     bot.run()
-
 
 if __name__ == '__main__':
     main()
