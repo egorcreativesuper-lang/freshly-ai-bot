@@ -371,15 +371,15 @@ class FreshlyBot:
             self.check_expiring_products,
             trigger=CronTrigger(hour=10, minute=0),
             id='daily_check'
-        )
     
-   def run(self):
-    self.application.run_polling()  # <-- Просто вызовите его как обычный метод
+    def run(self):
+        self.scheduler.start()
+        self.application.run_polling()  # ← Без await и asyncio.run!
 
-# ...
 if __name__ == '__main__':
-    bot = YourBotClass()
-    bot.run()  # <-- Без asyncio.run()
+    bot = FreshlyBot("TELEGRAM_BOT_TOKEN")
+    bot.setup_handlers()
+    bot.run()  # ← Просто вызов
         
         # Настраиваем обработчики
         self.setup_handlers()
