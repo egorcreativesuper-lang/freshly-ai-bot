@@ -379,8 +379,8 @@ class FreshlyBot:
 
 if __name__ == '__main__':
     bot = FreshlyBot("TELEGRAM_BOT_TOKEN")
-    bot.setup_handlers()
-    bot.run()  # ← Просто вызов
+    bot.setup_handlers()  # ← настраиваем ДО запуска
+    bot.run()             # ← запускаем — это блокирующий вызов!
         
         # Настраиваем обработчики
         self.setup_handlers()
