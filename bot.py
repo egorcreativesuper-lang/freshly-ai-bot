@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Настройка логирования
 logging.basicConfig(
@@ -15,38 +16,12 @@ logger = logging.getLogger(__name__)
 # Состояния для ConversationHandler
 WAITING_DATE = 1
 
-# База продуктов (в памяти для простоты)
+# База продуктов
 PRODUCTS_DATA = {
     "молоко": {"shelf_life": 7, "category": "молочные"},
     "кефир": {"shelf_life": 5, "category": "молочные"},
     "сыр": {"shelf_life": 14, "category": "молочные"},
     "творог": {"shelf_life": 5, "category": "молочные"},
-    "сметана": {"shelf_life": 7, "category": "молочные"},
-    "йогурт": {"shelf_life": 10, "category": "молочные"},
-    "яйца": {"shelf_life": 30, "category": "яйца"},
-    "курица": {"shelf_life": 3, "category": "мясо"},
-    "говядина": {"shelf_life": 4, "category": "мясо"},
-    "свинина": {"shelf_life": 4, "category": "мясо"},
-    "рыба": {"shelf_life": 2, "category": "рыба"},
-    "хлеб": {"shelf_life": 5, "category": "хлеб"},
-}
-
-# База рецептов
-RECIPES_DATA = {
-    "молочные": [
-        {
-            "name": "Сырники",
-            "time": "30 мин",
-            "portions": 4
-        }
-    ],
-    "мясо": [
-        {
-            "name": "Курица с овощами", 
-            "time": "40 мин",
-            "portions": 3
-        }
-    ]
 }
 
 class Database:
@@ -58,32 +33,14 @@ class Database:
         with sqlite3.connect('products.db', check_same_thread=False) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS products (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     product_name TEXT,
                     purchase_date DATE,
-                    expiration_date DATE,
-                    notified INTEGER DEFAULT 0
+                    expiration_date DATE
                 )
             ''')
-            conn.commit()
-    
-    def add_user(self, user_id, username):
-        """Добавление пользователя"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR IGNORE INTO users (user_id, username) 
-                VALUES (?, ?)
-            ''', (user_id, username or ''))
             conn.commit()
     
     def add_product(self, user_id, product_name, purchase_date):
@@ -132,34 +89,34 @@ class Database:
             conn.commit()
 
 class FreshlyBot:
-    def __init__(self, token):
+    def __init__(self, token, webhook_url=None):
         self.token = token
+        self.webhook_url = webhook_url
         self.db = Database()
         self.application = None
+        self.scheduler = BackgroundScheduler()
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         user = update.effective_user
-        self.db.add_user(user.id, user.username)
         
         welcome_text = f"""
 👋 Привет, {user.first_name}! Я Freshly Bot — твой помощник по отслеживанию сроков годности продуктов.
 
 📸 **Как пользоваться:**
-1. Отправь фото продукта или нажми кнопку ниже
+1. Нажми кнопку "📸 Добавить продукт"
 2. Укажи дату покупки
-3. Получай уведомления перед истечением срока
+3. Следи за сроками
 
 📋 **Команды:**
-/start - показать это сообщение  
 /list - список ваших продуктов
 /clear - очистить все продукты
 
-🎯 Начни с отправки фото продукта!
+🎯 Начни с добавления первого продукта!
         """
         
         keyboard = [
-            [KeyboardButton("📸 Сфотографировать продукт")],
+            [KeyboardButton("📸 Добавить продукт")],
             [KeyboardButton("📋 Мои продукты")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -184,12 +141,12 @@ class FreshlyBot:
         # Кнопки для выбора даты
         keyboard = [
             [KeyboardButton("Сегодня"), KeyboardButton("Вчера")],
-            [KeyboardButton("Ввести дату (ДД.ММ.ГГГГ)")]
+            [KeyboardButton("Отмена")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
         await update.message.reply_text(
-            f"📦 Распознан продукт: **{product_name}**\n"
+            f"📦 Продукт: **{product_name}**\n"
             "📅 Когда вы купили этот продукт?",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -203,17 +160,18 @@ class FreshlyBot:
         user_input = update.message.text
         product_name = context.user_data.get('current_product')
         
+        if user_input == "Отмена":
+            await update.message.reply_text("❌ Операция отменена.")
+            return ConversationHandler.END
+        
         try:
             if user_input == "Сегодня":
                 purchase_date = datetime.now()
             elif user_input == "Вчера":
                 purchase_date = datetime.now() - timedelta(days=1)
             else:
-                # Пытаемся распарсить дату
-                if '.' in user_input:
-                    purchase_date = datetime.strptime(user_input, '%d.%m.%Y')
-                else:
-                    raise ValueError("Неверный формат даты")
+                await update.message.reply_text("❌ Пожалуйста, выберите дату из кнопок")
+                return WAITING_DATE
             
             # Добавляем продукт
             success = self.db.add_product(user.id, product_name, purchase_date)
@@ -232,11 +190,9 @@ class FreshlyBot:
             else:
                 await update.message.reply_text("❌ Ошибка при добавлении продукта")
         
-        except ValueError as e:
-            await update.message.reply_text(
-                "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ или выберите из кнопок."
-            )
-            return WAITING_DATE
+        except Exception as e:
+            await update.message.reply_text("❌ Ошибка, попробуйте снова")
+            return ConversationHandler.END
         
         return ConversationHandler.END
     
@@ -293,7 +249,8 @@ class FreshlyBot:
         """Обработчик кнопок"""
         text = update.message.text
         
-        if text == "📸 Сфотографировать продукт":
+        if text == "📸 Добавить продукт":
+            # Имитируем отправку фото
             await self.handle_photo(update, context)
         elif text == "📋 Мои продукты":
             await self.list_products(update, context)
@@ -304,7 +261,7 @@ class FreshlyBot:
         conv_handler = ConversationHandler(
             entry_points=[
                 MessageHandler(filters.PHOTO, self.handle_photo),
-                MessageHandler(filters.Regex("^📸 Сфотографировать продукт$"), self.handle_photo)
+                MessageHandler(filters.Regex("^📸 Добавить продукт$"), self.handle_photo)
             ],
             states={
                 WAITING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_date)]
@@ -321,23 +278,58 @@ class FreshlyBot:
         # Обработчик кнопок
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
     
+    async def webhook_handler(self, request):
+        """Обработчик webhook запросов"""
+        update = Update.de_json(await request.json(), self.application.bot)
+        await self.application.process_update(update)
+        return {"status": "ok"}
+    
     def run(self):
         """Запуск бота"""
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         
-        logger.info("Бот запущен")
-        self.application.run_polling()
+        if self.webhook_url:
+            # Webhook режим для Render
+            import asyncio
+            from aiohttp import web
+            
+            async def main():
+                # Устанавливаем webhook
+                await self.application.bot.set_webhook(f"{self.webhook_url}/webhook")
+                
+                # Создаем aiohttp приложение
+                app = web.Application()
+                app.router.add_post('/webhook', self.webhook_handler)
+                app.router.add_get('/health', lambda request: web.Response(text="OK"))
+                
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, '0.0.0.0', 10000)
+                await site.start()
+                
+                logger.info("Бот запущен в webhook режиме")
+                await asyncio.Future()  # Бесконечный цикл
+            
+            asyncio.run(main())
+        else:
+            # Polling режим для локального тестирования
+            logger.info("Бот запущен в polling режиме")
+            self.application.run_polling()
 
 def main():
     """Основная функция"""
     BOT_TOKEN = os.getenv('BOT_TOKEN')
+    RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
     
     if not BOT_TOKEN:
         logger.error("Токен бота не найден! Установите переменную BOT_TOKEN")
         return
     
-    bot = FreshlyBot(BOT_TOKEN)
+    # Используем webhook на Render, polling локально
+    webhook_url = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else None
+    
+    bot = FreshlyBot(BOT_TOKEN, webhook_url)
     bot.run()
 
 if __name__ == '__main__':
