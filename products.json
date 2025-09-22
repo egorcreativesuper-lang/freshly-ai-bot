@@ -1,0 +1,16 @@
+{
+  "молоко": {"shelf_life": 7, "category": "молочные"},
+  "кефир": {"shelf_life": 5, "category": "молочные"},
+  "сыр": {"shelf_life": 14, "category": "молочные"},
+  "творог": {"shelf_life": 5, "category": "молочные"},
+  "сметана": {"shelf_life": 7, "category": "молочные"},
+  "йогурт": {"shelf_life": 10, "category": "молочные"},
+  "яйца": {"shelf_life": 30, "category": "яйца"},
+  "курица": {"shelf_life": 3, "category": "мясо"},
+  "говядина": {"shelf_life": 4, "category": "мясо"},
+  "свинина": {"shelf_life": 4, "category": "мясо"},
+  "рыба": {"shelf_life": 2, "category": "рыба"},
+  "хлеб": {"shelf_life": 5, "category": "хлеб"},
+  "колбаса": {"shelf_life": 7, "category": "колбасные"},
+  "сосиски": {"shelf_life": 5, "category": "колбасные"}
+}
