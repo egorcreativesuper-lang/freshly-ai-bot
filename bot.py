@@ -13,7 +13,7 @@ from apscheduler.jobstores.base import JobLookupError
 import json
 
 # Состояния для ConversationHandler
-CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE, BROWSE_PRODUCTS, BROWSE_PRODUCT_DETAIL = range(5)
+PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE, BROWSE_PRODUCTS, BROWSE_PRODUCT_DETAIL = range(6)
 
 # Настройка логирования
 logging.basicConfig(
@@ -259,15 +259,10 @@ async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
-    context.user_data['adding_by_photo'] = True
-    return ConversationHandler.END
+    return PHOTO_RECOGNITION  # Переходим в состояние ожидания фото
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает фото и начинает запрос даты покупки."""
-    if not context.user_data.get('adding_by_photo'):
-        await update.message.reply_text("Пожалуйста, используйте кнопки меню для добавления продукта.", reply_markup=get_main_menu_keyboard())
-        return ConversationHandler.END
-
     try:
         user_id = update.message.from_user.id
         os.makedirs("photos", exist_ok=True)
@@ -282,11 +277,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
         if not product_name:
             await update.message.reply_text("❌ Не удалось распознать продукт. Попробуйте снова!", reply_markup=get_main_menu_keyboard())
-            context.user_data.pop('adding_by_photo', None)
             return ConversationHandler.END
 
         context.user_data['product_name'] = product_name
-        context.user_data.pop('adding_by_photo', None)
         await update.message.reply_text(
             f"🤖 *Распознан продукт:* {product_name}\n\n"
             "📅 *Шаг 2/3: Дата покупки*\n"
@@ -298,12 +291,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             reply_markup=get_cancel_keyboard()
         )
 
-        return CHOOSING_PURCHASE_DATE
+        return CHOOSING_PURCHASE_DATE  # Продолжаем диалог
 
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {e}")
         await update.message.reply_text("❌ Произошла ошибка при обработке фото", reply_markup=get_main_menu_keyboard())
-        context.user_data.pop('adding_by_photo', None)
         return ConversationHandler.END
 
 # --- Основные команды ---
@@ -606,6 +598,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice),
             ],
             states={
+                PHOTO_RECOGNITION: [MessageHandler(filters.PHOTO, handle_photo)],
                 CHOOSING_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_product_name)],
                 CHOOSING_PURCHASE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)],
                 CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
@@ -618,7 +611,9 @@ def main():
         )
 
         application.add_handler(conv_handler)
-        application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+        # Убираем отдельный обработчик фото — он теперь в состоянии PHOTO_RECOGNITION
+        # application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # <-- УДАЛЯЕМ ЭТУ СТРОКУ
 
         scheduler.add_job(
             check_expired_products,
