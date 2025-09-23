@@ -390,24 +390,35 @@ class FreshlyBot:
 
     async def run(self):
         """Запуск бота и планировщика в существующем event loop"""
-        self.application = Application.builder().token(self.token).build()
-        self.setup_handlers()
-        self.setup_scheduler()
-        self.scheduler.start()
-        logger.info("🚀 Бот запускается...")
-
-        # Инициализация и запуск
-        await self.application.initialize()
-        await self.application.updater.start_polling()
-        await self.application.start()
-
-        # Ждём завершения (например, по Ctrl+C)
-        # В продакшене на Render — просто держим бота запущенным
         try:
+            self.application = Application.builder().token(self.token).build()
+            self.setup_handlers()
+            self.setup_scheduler()
+            self.scheduler.start()
+            logger.info("🚀 Бот запускается...")
+
+            # Инициализация
+            await self.application.initialize()
+            logger.info("Intialized application.")
+
+            # Запуск получения обновлений
+            await self.application.updater.start_polling()
+            logger.info("Started polling.")
+
+            # Запуск обработки
+            await self.application.start()
+            logger.info("Application started.")
+
+            # Ждём бесконечно
             while True:
-                await asyncio.sleep(3600)  # Спим 1 час, чтобы не грузить CPU
+                await asyncio.sleep(3600)  # Спим 1 час
+
         except asyncio.CancelledError:
-            pass  # Это нормально при остановке
+            logger.info("🔄 Получен сигнал отмены задачи.")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка в run(): {e}")
+            raise
 
 
 async def main():
@@ -420,10 +431,12 @@ async def main():
 
     bot = FreshlyBot(BOT_TOKEN)
 
-    # Graceful shutdown при Ctrl+C или SIGTERM (например, при перезапуске на Render)
+    # Graceful shutdown при SIGTERM (Render) или SIGINT (Ctrl+C)
     def stop_scheduler(signum, frame):
-        logger.info("🛑 Остановка планировщика...")
-        bot.scheduler.shutdown(wait=False)
+        logger.info("🛑 Получен сигнал остановки. Останавливаем планировщик...")
+        if hasattr(bot, 'scheduler') and bot.scheduler.running:
+            bot.scheduler.shutdown(wait=False)
+            logger.info("⏹️ Планировщик остановлен.")
 
     signal.signal(signal.SIGINT, stop_scheduler)
     signal.signal(signal.SIGTERM, stop_scheduler)
@@ -431,13 +444,37 @@ async def main():
     try:
         await bot.run()
     except KeyboardInterrupt:
-        logger.info("🛑 Получен сигнал завершения. Останавливаем бота...")
+        logger.info("🛑 Получен KeyboardInterrupt.")
     finally:
+        logger.info("🔧 Начинаем graceful shutdown...")
+
         if bot.application:
-            await bot.application.updater.stop()
-            await bot.application.stop()
-            await bot.application.shutdown()
-        logger.info("✅ Бот остановлен.")
+            # Останавливаем updater, только если он запущен
+            if bot.application.updater and bot.application.updater.running:
+                try:
+                    await bot.application.updater.stop()
+                    logger.info("⏹️ Updater остановлен.")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при остановке updater: {e}")
+
+            # Останавливаем приложение, только если оно запущено
+            if bot.application.running:
+                try:
+                    await bot.application.stop()
+                    await bot.application.shutdown()
+                    logger.info("⏹️ Application остановлен и завершён.")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при остановке application: {e}")
+
+        # Дополнительная проверка планировщика
+        if hasattr(bot, 'scheduler') and bot.scheduler.running:
+            try:
+                bot.scheduler.shutdown(wait=False)
+                logger.info("⏹️ Планировщик остановлен.")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при остановке планировщика: {e}")
+
+        logger.info("✅ Бот полностью остановлен.")
 
 
 if __name__ == '__main__':
