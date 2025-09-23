@@ -1,16 +1,18 @@
 import logging
 import sqlite3
 import os
-import re
 import random
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
+from flask import Flask
+import threading
+import asyncio
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -22,37 +24,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка токена
+# Загрузка токена и URL
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
-    logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Render → Environment")
+    logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Amvera → Переменные окружения")
+    exit(1)
+
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+if not WEBHOOK_URL:
+    logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
     exit(1)
 
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# Инициализация базы данных
+# Инициализация базы данных SQLite
 def init_db():
-    conn = sqlite3.connect('products.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            purchase_date TEXT NOT NULL,
-            expiration_days INTEGER NOT NULL,
-            added_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            notified BOOLEAN DEFAULT FALSE
-        )
-    ''')
-    # Добавляем индексы для быстрого поиска
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON products(user_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_expires_at ON products(expires_at)')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                purchase_date TEXT NOT NULL,
+                expiration_days INTEGER NOT NULL,
+                added_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                notified BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON products(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_expires_at ON products(expires_at)')
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("✅ База данных SQLite инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        exit(1)
 
 init_db()
 
@@ -84,7 +96,6 @@ async def recognize_product(photo_path: str) -> str:
     return random.choice(products)
 
 def get_main_menu_keyboard():
-    """Возвращает обычную клавиатуру главного меню."""
     keyboard = [
         ["📸 Добавить по фото", "✍️ Добавить вручную"],
         ["📋 Мои продукты", "🚨 Просроченные"],
@@ -93,13 +104,11 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
-    """Возвращает клавиатуру с кнопкой отмены и главного меню."""
     keyboard = [["❌ Отмена", "🏠 Главное меню"]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
 # --- Диалог добавления продукта ВРУЧНУЮ ---
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начинает диалог добавления продукта вручную. Запрашивает название."""
     await update.message.reply_text(
         "✏️ *Шаг 1/3: Название продукта*\n\n"
         "Введите название продукта (например, 'Молоко', 'Сыр Моцарелла'):\n\n"
@@ -110,7 +119,6 @@ async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CHOOSING_PRODUCT_NAME
 
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет название продукта и запрашивает дату покупки."""
     user_input = update.message.text.strip()
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
         await cancel(update, context)
@@ -134,7 +142,6 @@ async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE
     return CHOOSING_PURCHASE_DATE
 
 async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет дату покупки и запрашивает дату истечения срока."""
     user_input = update.message.text.strip()
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
         await cancel(update, context)
@@ -167,7 +174,6 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
     return CHOOSING_EXPIRATION_DATE
 
 async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет дату истечения срока, вычисляет срок годности в днях и сохраняет продукт в БД."""
     user_input = update.message.text.strip()
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
         await cancel(update, context)
@@ -198,7 +204,6 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data['expires_at'] = parsed_date.isoformat()
 
-    # Вычисляем срок годности в днях
     purchase_date = datetime.strptime(context.user_data['purchase_date'], '%Y-%m-%d').date()
     expiration_days = (parsed_date - purchase_date).days
 
@@ -213,47 +218,50 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data['expiration_days'] = expiration_days
 
-    # Сохраняем в БД
+    # Сохраняем в SQLite
     user_id = update.message.from_user.id
     product_name = context.user_data['product_name']
     purchase_date_str = context.user_data['purchase_date']
     expires_at_str = context.user_data['expires_at']
 
-    conn = sqlite3.connect('products.db')
-    cursor = conn.cursor()
-    added_at = datetime.now().isoformat()
+    try:
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO products (user_id, name, purchase_date, expiration_days, added_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, product_name, purchase_date_str, expiration_days, datetime.now().isoformat(), expires_at_str))
+        product_id = cursor.lastrowid
+        conn.commit()
+        cursor.close()
+        conn.close()
 
-    cursor.execute('''
-        INSERT INTO products (user_id, name, purchase_date, expiration_days, added_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (user_id, product_name, purchase_date_str, expiration_days, added_at, expires_at_str))
-    product_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+        # Планируем уведомление
+        schedule_notification(product_id, user_id, product_name, expiration_days)
 
-    # Планируем уведомление
-    schedule_notification(product_id, user_id, product_name, expiration_days)
+        success_text = (
+            f"🎉 *Ура! Продукт добавлен!*\n\n"
+            f"🔹 *Название:* {product_name}\n"
+            f"📅 *Куплено:* {purchase_date_str}\n"
+            f"📆 *Истекает:* {expires_at_str}\n"
+            f"⏳ *Срок годности:* {expiration_days} дней\n\n"
+            "🔔 Я напомню вам за день до истечения срока!"
+        )
 
-    success_text = (
-        f"🎉 *Ура! Продукт добавлен!*\n\n"
-        f"🔹 *Название:* {product_name}\n"
-        f"📅 *Куплено:* {purchase_date_str}\n"
-        f"📆 *Истекает:* {expires_at_str}\n"
-        f"⏳ *Срок годности:* {expiration_days} дней\n\n"
-        "🔔 Я напомню вам за день до истечения срока!"
-    )
+        await update.message.reply_text(
+            success_text,
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
 
-    await update.message.reply_text(
-        success_text,
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
-    )
+    except Exception as e:
+        logger.error(f"Ошибка сохранения продукта: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при сохранении продукта.", reply_markup=get_main_menu_keyboard())
 
     return ConversationHandler.END
 
 # --- Диалог добавления продукта ПО ФОТО ---
 async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начинает процесс добавления продукта через фото."""
     await update.message.reply_text(
         "📸 *Добавление по фото*\n\n"
         "Отправьте фото продукта, и я попробую его распознать!\n\n"
@@ -264,7 +272,6 @@ async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return PHOTO_RECOGNITION
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает фото и начинает запрос даты покупки."""
     try:
         user_id = update.message.from_user.id
         os.makedirs("photos", exist_ok=True)
@@ -277,7 +284,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         product_name = await recognize_product(photo_path)
         
-        # Удаляем фото после обработки
         if os.path.exists(photo_path):
             os.remove(photo_path)
 
@@ -305,7 +311,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
 async def handle_text_in_photo_recognition(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает текстовые сообщения в состоянии ожидания фото."""
     user_input = update.message.text.strip()
     
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
@@ -321,7 +326,6 @@ async def handle_text_in_photo_recognition(update: Update, context: ContextTypes
 
 # --- Основные команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приветствие и показ главного меню."""
     welcome_text = (
         "🌟 *Добро пожаловать в Freshly Bot!*\n\n"
         "Я — ваш личный помощник в борьбе с пищевыми отходами 🍎🥦\n\n"
@@ -340,26 +344,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает главное меню."""
-    welcome_text = (
-        "🌟 *Добро пожаловать в Freshly Bot!*\n\n"
-        "Я — ваш личный помощник в борьбе с пищевыми отходами 🍎🥦\n\n"
-        "✨ *Что я умею:*\n"
-        "📸 *Распознавать продукты* по фото\n"
-        "📅 *Отслеживать сроки годности*\n"
-        "🔔 *Напоминать* о скором истечении срока\n"
-        "👩‍🍳 *Предлагать рецепты* для использования продуктов\n\n"
-        "Выберите действие ниже и начните спасать еду и деньги! 💰"
-    )
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
-    )
-    return ConversationHandler.END
+    return await start(update, context)
 
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показывает список продуктов."""
     try:
         user_id = update.message.from_user.id
         conn = sqlite3.connect('products.db')
@@ -410,7 +397,6 @@ async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
 async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показывает просроченные продукты."""
     try:
         user_id = update.message.from_user.id
         conn = sqlite3.connect('products.db')
@@ -443,13 +429,13 @@ async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
 async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Удаляет все продукты."""
     try:
         user_id = update.message.from_user.id
         conn = sqlite3.connect('products.db')
         cursor = conn.cursor()
         cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
         conn.commit()
+        cursor.close()
         conn.close()
 
         for job in scheduler.get_jobs():
@@ -468,7 +454,6 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показывает инструкцию."""
     help_text = (
         "ℹ️ *Как пользоваться ботом:*\n\n"
         "1️⃣ *Добавить продукт:*\n"
@@ -490,7 +475,6 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отменяет текущий диалог."""
     await update.message.reply_text(
         '✅ Операция отменена.',
         reply_markup=get_main_menu_keyboard()
@@ -500,7 +484,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # --- Планировщик ---
 def schedule_notification(product_id: int, user_id: int, product_name: str, expiration_days: int):
-    """Планирует уведомление за 1 день до истечения срока"""
     try:
         notify_time = datetime.now() + timedelta(days=expiration_days - 1)
         job_id = f"notify_{user_id}_{product_id}"
@@ -522,7 +505,6 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
         logger.error(f"Ошибка планирования уведомления: {e}")
 
 async def send_notification(user_id: int, product_name: str, product_id: int):
-    """Отправляет уведомление о скором истечении срока"""
     try:
         from telegram import Bot
         bot = Bot(token=TOKEN)
@@ -537,7 +519,6 @@ async def send_notification(user_id: int, product_name: str, product_id: int):
         logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 async def check_expired_products():
-    """Ежедневная проверка просроченных продуктов"""
     try:
         from telegram import Bot
         bot = Bot(token=TOKEN)
@@ -564,14 +545,12 @@ async def check_expired_products():
                 if expired_products:
                     product_list = "\n".join([f"• {name} (истек {expires_at})" for name, expires_at in expired_products])
                     
-                    # Сначала помечаем как notified, чтобы избежать повторных уведомлений
                     cursor.execute('''
                         UPDATE products SET notified = TRUE 
                         WHERE user_id = ? AND expires_at <= ?
                     ''', (user_id, today))
                     conn.commit()
 
-                    # Теперь отправляем уведомление
                     try:
                         await bot.send_message(
                             chat_id=user_id,
@@ -591,7 +570,6 @@ async def check_expired_products():
 
 # --- Обработчик меню ---
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает выбор пользователя из главного меню."""
     text = update.message.text
 
     if text == "🏠 Главное меню":
@@ -615,26 +593,39 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
 
+# --- Flask Health Check Server ---
+app = Flask(__name__)
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
 # --- Основная функция ---
+async def set_webhook(application):
+    webhook_path = f"/{TOKEN}"
+    full_webhook_url = WEBHOOK_URL + webhook_path
+    await application.bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
+    logger.info(f"🌐 Webhook установлен: {full_webhook_url}")
+
 def main():
     try:
+        # Запускаем Flask в фоновом потоке
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+
         application = Application.builder().token(TOKEN).build()
 
-        # Обработчик для добавления вручную
+        # Обработчики
         manual_conv_handler = ConversationHandler(
-            entry_points=[
-                MessageHandler(filters.Regex("^✍️ Добавить вручную$"), start_add_manually),
-            ],
+            entry_points=[MessageHandler(filters.Regex("^✍️ Добавить вручную$"), start_add_manually)],
             states={
-                CHOOSING_PRODUCT_NAME: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_product_name)
-                ],
-                CHOOSING_PURCHASE_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)
-                ],
-                CHOOSING_EXPIRATION_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)
-                ],
+                CHOOSING_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_product_name)],
+                CHOOSING_PURCHASE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)],
+                CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
             },
             fallbacks=[
                 MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
@@ -643,22 +634,15 @@ def main():
             allow_reentry=True
         )
 
-        # Обработчик для добавления по фото
         photo_conv_handler = ConversationHandler(
-            entry_points=[
-                MessageHandler(filters.Regex("^📸 Добавить по фото$"), start_add_by_photo),
-            ],
+            entry_points=[MessageHandler(filters.Regex("^📸 Добавить по фото$"), start_add_by_photo)],
             states={
                 PHOTO_RECOGNITION: [
                     MessageHandler(filters.PHOTO, handle_photo),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_in_photo_recognition)
                 ],
-                CHOOSING_PURCHASE_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)
-                ],
-                CHOOSING_EXPIRATION_DATE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)
-                ],
+                CHOOSING_PURCHASE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)],
+                CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
             },
             fallbacks=[
                 MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
@@ -667,15 +651,12 @@ def main():
             allow_reentry=True
         )
 
-        # Добавляем обработчики
         application.add_handler(manual_conv_handler)
         application.add_handler(photo_conv_handler)
-        
-        # Обработчик главного меню и команды start
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
 
-        # Планируем ежедневную проверку просроченных продуктов
+        # Планировщик
         scheduler.add_job(
             check_expired_products,
             'cron',
@@ -684,8 +665,19 @@ def main():
             id='daily_expired_check'
         )
 
-        logger.info("🚀 Бот запущен...")
-        application.run_polling()
+        # Устанавливаем вебхук
+        asyncio.run(set_webhook(application))
+
+        # Запускаем Telegram бота через вебхук
+        PORT = int(os.environ.get('PORT', 8080))
+        logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=WEBHOOK_URL + f"/{TOKEN}",
+            secret_token=TOKEN
+        )
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
