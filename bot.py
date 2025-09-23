@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import asyncio
+import signal
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -42,7 +43,7 @@ class Database:
 
     def init_db(self):
         """Инициализация базы данных SQLite"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:  # ← Убрали check_same_thread=False
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS products (
@@ -65,7 +66,7 @@ class Database:
 
     async def add_user(self, user_id: int, username: str):
         """Добавление пользователя"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute(
                 'INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)',
@@ -81,7 +82,7 @@ class Database:
         shelf_life = PRODUCTS_DATA[product_name]['shelf_life']
         expiration_date = purchase_date + timedelta(days=shelf_life)
 
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO products (user_id, product_name, purchase_date, expiration_date)
@@ -93,7 +94,7 @@ class Database:
 
     async def get_user_products(self, user_id: int):
         """Получение продуктов пользователя"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT product_name, purchase_date, expiration_date
@@ -105,7 +106,7 @@ class Database:
 
     async def get_products_count(self, user_id: int) -> int:
         """Получение количества продуктов пользователя"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = ?', (user_id,))
             result = cursor.fetchone()
@@ -113,7 +114,7 @@ class Database:
 
     async def clear_user_products(self, user_id: int):
         """Очистка продуктов пользователя"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
             conn.commit()
@@ -121,7 +122,7 @@ class Database:
     async def get_expiring_products(self):
         """Получение продуктов, срок которых истекает завтра"""
         tomorrow = (datetime.now() + timedelta(days=1)).date()
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT p.user_id, u.username, p.product_name, p.expiration_date
@@ -133,7 +134,7 @@ class Database:
 
     async def mark_as_notified(self, user_id: int, product_name: str):
         """Пометить продукт как уведомленный"""
-        with sqlite3.connect('products.db', check_same_thread=False) as conn:
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE products
@@ -416,17 +417,17 @@ class FreshlyBot:
             id='daily_check'
         )
 
-    def run(self):
+    async def run(self):
         """Запуск бота и планировщика"""
         self.application = Application.builder().token(self.token).build()
-        self.setup_handlers()    # Настраиваем хендлеры
-        self.setup_scheduler()   # Настраиваем планировщик
-        self.scheduler.start()   # Запускаем планировщик
+        self.setup_handlers()
+        self.setup_scheduler()
+        self.scheduler.start()
         logger.info("🚀 Бот запускается...")
-        self.application.run_polling()  # ← Главный цикл бота
+        await self.application.run_polling()
 
 
-def main():
+async def main():
     """Основная функция"""
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
@@ -435,8 +436,17 @@ def main():
         return
 
     bot = FreshlyBot(BOT_TOKEN)
-    bot.run()  # ← Запуск без asyncio.run()
+
+    # Graceful shutdown при Ctrl+C
+    def stop_scheduler(signum, frame):
+        logger.info("🛑 Остановка планировщика...")
+        bot.scheduler.shutdown(wait=False)
+
+    signal.signal(signal.SIGINT, stop_scheduler)
+    signal.signal(signal.SIGTERM, stop_scheduler)
+
+    await bot.run()
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
