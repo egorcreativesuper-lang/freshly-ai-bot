@@ -13,7 +13,7 @@ from apscheduler.jobstores.base import JobLookupError
 import json
 
 # Состояния для ConversationHandler
-PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE, BROWSE_PRODUCTS, BROWSE_PRODUCT_DETAIL = range(6)
+PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
 
 # Настройка логирования
 logging.basicConfig(
@@ -67,6 +67,16 @@ def load_recipes():
 
 RECIPES = load_recipes()
 
+# Вспомогательная функция для парсинга даты
+def parse_date(date_str: str):
+    date_formats = ['%Y-%m-%d', '%Y.%m.%d', '%d.%m.%Y', '%d-%m-%Y']
+    for fmt in date_formats:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
 # Вспомогательные функции
 async def recognize_product(photo_path: str) -> str:
     """Заглушка для распознавания продукта"""
@@ -87,7 +97,7 @@ def get_cancel_keyboard():
     keyboard = [["❌ Отмена", "🏠 Главное меню"]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
-# Функции диалога добавления продукта
+# --- Диалог добавления продукта ВРУЧНУЮ ---
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления продукта вручную. Запрашивает название."""
     await update.message.reply_text(
@@ -130,16 +140,7 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
         await cancel(update, context)
         return ConversationHandler.END
 
-    date_formats = ['%Y-%m-%d', '%Y.%m.%d', '%d.%m.%Y', '%d-%m-%Y']
-    parsed_date = None
-
-    for fmt in date_formats:
-        try:
-            parsed_date = datetime.strptime(user_input, fmt).date()
-            break
-        except ValueError:
-            continue
-
+    parsed_date = parse_date(user_input)
     if parsed_date is None:
         await update.message.reply_text(
             "😔 *Неверный формат даты.*\n"
@@ -172,16 +173,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         await cancel(update, context)
         return ConversationHandler.END
 
-    date_formats = ['%Y-%m-%d', '%Y.%m.%d', '%d.%m.%Y', '%d-%m-%Y']
-    parsed_date = None
-
-    for fmt in date_formats:
-        try:
-            parsed_date = datetime.strptime(user_input, fmt).date()
-            break
-        except ValueError:
-            continue
-
+    parsed_date = parse_date(user_input)
     if parsed_date is None:
         await update.message.reply_text(
             "😔 *Неверный формат даты.*\n"
@@ -189,6 +181,16 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
             "• ГГГГ-ММ-ДД (2025-10-07)\n"
             "• ГГГГ.ММ.ДД (2025.10.07)\n"
             "• ДД.ММ.ГГГГ (07.10.2025)",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return CHOOSING_EXPIRATION_DATE
+
+    today = datetime.now().date()
+    if parsed_date < today:
+        await update.message.reply_text(
+            "❌ *Ошибка:* Дата истечения не может быть в прошлом.\n"
+            "Пожалуйста, введите корректную дату.",
             parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
@@ -202,7 +204,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
     if expiration_days < 0:
         await update.message.reply_text(
-            "❌ *Ошибка:* Дата истечения не может быть раньше дату покупки.\n"
+            "❌ *Ошибка:* Дата истечения не может быть раньше даты покупки.\n"
             "Пожалуйста, начните заново.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
@@ -275,6 +277,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
         product_name = await recognize_product(photo_path)
         
+        # Удаляем фото после обработки
+        if os.path.exists(photo_path):
+            os.remove(photo_path)
+
         if not product_name:
             await update.message.reply_text("❌ Не удалось распознать продукт. Попробуйте снова!", reply_markup=get_main_menu_keyboard())
             return ConversationHandler.END
@@ -558,21 +564,26 @@ async def check_expired_products():
                 if expired_products:
                     product_list = "\n".join([f"• {name} (истек {expires_at})" for name, expires_at in expired_products])
                     
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=f"🚨 *Просроченные продукты:*\n{product_list}\n\nРекомендуем выбросить!",
-                        parse_mode='Markdown'
-                    )
-                    
+                    # Сначала помечаем как notified, чтобы избежать повторных уведомлений
                     cursor.execute('''
                         UPDATE products SET notified = TRUE 
                         WHERE user_id = ? AND expires_at <= ?
                     ''', (user_id, today))
+                    conn.commit()
+
+                    # Теперь отправляем уведомление
+                    try:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"🚨 *Просроченные продукты:*\n{product_list}\n\nРекомендуем выбросить!",
+                            parse_mode='Markdown'
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
                     
             except Exception as e:
-                logger.error(f"Ошибка уведомления пользователя {user_id}: {e}")
+                logger.error(f"Ошибка обработки пользователя {user_id}: {e}")
         
-        conn.commit()
         conn.close()
         
     except Exception as e:
@@ -581,11 +592,13 @@ async def check_expired_products():
 # --- Обработчик меню ---
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает выбор пользователя из главного меню."""
-    context.user_data.clear()
     text = update.message.text
 
     if text == "🏠 Главное меню":
+        context.user_data.clear()
         return await show_main_menu(update, context)
+    elif text == "❌ Отмена":
+        return await cancel(update, context)
     elif text == "📸 Добавить по фото":
         return await start_add_by_photo(update, context)
     elif text == "✍️ Добавить вручную":
@@ -662,6 +675,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
 
+        # Планируем ежедневную проверку просроченных продуктов
         scheduler.add_job(
             check_expired_products,
             'cron',
