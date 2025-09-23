@@ -23,26 +23,6 @@ if not TOKEN:
     logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Render → Environment")
     exit(1)
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# 🔍 ДЕТЕКТОР UPDATER: ЛОВИМ МОМЕНТ СОЗДАНИЯ Updater
-import sys
-from telegram.ext import Updater  # Импортируем для monkey-patching
-
-# Сохраняем оригинальный конструктор
-_original_updater_init = Updater.__init__
-
-def _patched_updater_init(self, *args, **kwargs):
-    import traceback
-    logger.critical("🚨🚨🚨 ОБНАРУЖЕНА ПОПЫТКА СОЗДАТЬ Updater! Это запрещено в версии 20.7+.")
-    logger.critical("👇👇👇 СТЕК ВЫЗОВОВ (где именно происходит создание):")
-    traceback.print_stack()
-    raise RuntimeError("Обнаружен Updater — это несовместимо с python-telegram-bot v20.7. Найдите и удалите этот вызов.")
-
-# Подменяем конструктор
-Updater.__init__ = _patched_updater_init
-logger.info("✅ Детектор Updater активирован. Любая попытка создать Updater вызовет падение с трассировкой.")
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
 scheduler.start()
@@ -455,7 +435,7 @@ def main():
         application.run_polling()
 
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}", exc_info=True)  # <-- Важно: exc_info=True покажет полный стек
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
         scheduler.shutdown()
 
