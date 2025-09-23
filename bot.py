@@ -101,8 +101,8 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
-    """Возвращает клавиатуру с кнопкой отмены."""
-    keyboard = [["❌ Отмена"]]
+    """Возвращает клавиатуру с кнопкой отмены и главного меню."""
+    keyboard = [["❌ Отмена", "🏠 Главное меню"]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
 def get_back_to_menu_keyboard():
@@ -139,8 +139,7 @@ async def send_notification(user_id: int, product_name: str, product_id: int):
         from telegram import Bot
         bot = Bot(token=TOKEN)
         
-        # Готовим клавиатуру для уведомления (это инлайн, т.к. обычную нельзя отправить в "толкнутом" сообщении)
-        # Но для основного интерфейса мы используем только обычные клавиатуры.
+        # Готовим инлайн-клавиатуру для уведомления (это ограничение Telegram — в "толкнутых" сообщениях можно использовать только инлайн)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         reply_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("📖 Показать рецепт", callback_data=create_safe_callback_data(product_name, product_id))],
@@ -180,7 +179,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления продукта вручную. Запрашивает название."""
     await update.message.reply_text(
-        "Введите название продукта (или нажмите '❌ Отмена'):",
+        "Введите название продукта (или нажмите '❌ Отмена' / '🏠 Главное меню'):",
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_PRODUCT_NAME
@@ -188,7 +187,7 @@ async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет название продукта и запрашивает дату покупки."""
     user_input = update.message.text.strip()
-    if user_input == "❌ Отмена":
+    if user_input == "❌ Отмена" or user_input == "🏠 Главное меню":
         await cancel(update, context)
         return ConversationHandler.END
 
@@ -198,7 +197,7 @@ async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data['product_name'] = user_input
     await update.message.reply_text(
-        "Введите дату покупки в формате ГГГГ-ММ-ДД (например, 2025-09-23):",
+        "Введите дату покупки в формате ГГГГ-ММ-ДД или ГГГГ.ММ.ДД (например, 2025-09-23):",
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_PURCHASE_DATE
@@ -206,7 +205,7 @@ async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет дату покупки и запрашивает дату истечения срока."""
     user_input = update.message.text.strip()
-    if user_input == "❌ Отмена":
+    if user_input == "❌ Отмена" or user_input == "🏠 Главное меню":
         await cancel(update, context)
         return ConversationHandler.END
 
@@ -214,11 +213,17 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
         purchase_date = datetime.strptime(user_input, '%Y-%m-%d').date()
         context.user_data['purchase_date'] = purchase_date.isoformat()
     except ValueError:
-        await update.message.reply_text("Неверный формат даты. Пожалуйста, введите дату в формате ГГГГ-ММ-ДД.")
-        return CHOOSING_PURCHASE_DATE
+        # Попробуйте с заменой точек на дефисы
+        formatted_date = user_input.replace('.', '-')
+        try:
+            purchase_date = datetime.strptime(formatted_date, '%Y-%m-%d').date()
+            context.user_data['purchase_date'] = purchase_date.isoformat()
+        except ValueError:
+            await update.message.reply_text("Неверный формат даты. Пожалуйста, введите дату в формате ГГГГ-ММ-ДД или ГГГГ.ММ.ДД.")
+            return CHOOSING_PURCHASE_DATE
 
     await update.message.reply_text(
-        "Введите дату истечения срока в формате ГГГГ-ММ-ДД:",
+        "Введите дату истечения срока в формате ГГГГ-ММ-ДД или ГГГГ.ММ.ДД:",
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_EXPIRATION_DATE
@@ -226,7 +231,7 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
 async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет дату истечения срока, вычисляет срок годности в днях и сохраняет продукт в БД."""
     user_input = update.message.text.strip()
-    if user_input == "❌ Отмена":
+    if user_input == "❌ Отмена" or user_input == "🏠 Главное меню":
         await cancel(update, context)
         return ConversationHandler.END
 
@@ -234,8 +239,14 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         expires_at = datetime.strptime(user_input, '%Y-%m-%d').date()
         context.user_data['expires_at'] = expires_at.isoformat()
     except ValueError:
-        await update.message.reply_text("Неверный формат даты. Пожалуйста, введите дату в формате ГГГГ-ММ-ДД.")
-        return CHOOSING_EXPIRATION_DATE
+        # Попробуйте с заменой точек на дефисы
+        formatted_date = user_input.replace('.', '-')
+        try:
+            expires_at = datetime.strptime(formatted_date, '%Y-%m-%d').date()
+            context.user_data['expires_at'] = expires_at.isoformat()
+        except ValueError:
+            await update.message.reply_text("Неверный формат даты. Пожалуйста, введите дату в формате ГГГГ-ММ-ДД или ГГГГ.ММ.ДД.")
+            return CHOOSING_EXPIRATION_DATE
 
     # Вычисляем срок годности в днях
     purchase_date = datetime.strptime(context.user_data['purchase_date'], '%Y-%m-%d').date()
@@ -283,7 +294,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает процесс добавления продукта через фото."""
     await update.message.reply_text(
-        "Отправьте фото продукта (или нажмите '❌ Отмена'):",
+        "Отправьте фото продукта (или нажмите '❌ Отмена' / '🏠 Главное меню'):",
         reply_markup=get_cancel_keyboard()
     )
     # Устанавливаем флаг, что продукт добавляется по фото
@@ -323,7 +334,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         context.user_data.pop('adding_by_photo', None) # Сбрасываем флаг
         await update.message.reply_text(
             f"Распознан продукт: *{product_name}*\n"
-            "Теперь введите дату покупки в формате ГГГГ-ММ-ДД:",
+            "Теперь введите дату покупки в формате ГГГГ-ММ-ДД или ГГГГ.ММ.ДД:",
             parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
@@ -730,7 +741,7 @@ def main():
                 BROWSE_PRODUCTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, browse_product_selection)],
                 BROWSE_PRODUCT_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_product_action)],
             },
-            fallbacks=[MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
+            fallbacks=[MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel)],
             allow_reentry=True
         )
 
