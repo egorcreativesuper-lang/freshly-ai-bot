@@ -1,18 +1,14 @@
-import os
 import logging
 import sqlite3
-import asyncio
-import signal
-import threading
+import os
+import re
+import random
 from datetime import datetime, timedelta
-from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    filters, ContextTypes, ConversationHandler, CallbackQueryHandler
-)
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.jobstores.base import JobLookupError
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,493 +17,427 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Состояния для ConversationHandler
-WAITING_PRODUCT, WAITING_DATE = range(2)
+# Загрузка токена
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TOKEN:
+    logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Render → Environment")
+    exit(1)
 
-# База продуктов
-PRODUCTS_DATA = {
-    "молоко": {"shelf_life": 7, "category": "молочные"},
-    "кефир": {"shelf_life": 5, "category": "молочные"},
-    "сыр": {"shelf_life": 14, "category": "молочные"},
-    "творог": {"shelf_life": 5, "category": "молочные"},
-    "сметана": {"shelf_life": 7, "category": "молочные"},
-    "йогурт": {"shelf_life": 10, "category": "молочные"},
-    "яйца": {"shelf_life": 30, "category": "яйца"},
-    "курица": {"shelf_life": 3, "category": "мясо"},
-    "говядина": {"shelf_life": 4, "category": "мясо"},
-    "рыба": {"shelf_life": 2, "category": "рыба"},
-    "хлеб": {"shelf_life": 5, "category": "хлеб"},
-}
+# Инициализация планировщика
+scheduler = BackgroundScheduler()
+scheduler.start()
 
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect('products.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            purchase_date TEXT NOT NULL,
+            expiration_days INTEGER NOT NULL,
+            added_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            notified BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    # Добавляем индексы для быстрого поиска
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON products(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_expires_at ON products(expires_at)')
+    conn.commit()
+    conn.close()
 
-class Database:
-    def __init__(self):
-        self.init_db()
+init_db()
 
-    def init_db(self):
-        """Инициализация базы данных SQLite"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS products (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    product_name TEXT,
-                    purchase_date DATE,
-                    expiration_date DATE,
-                    notified BOOLEAN DEFAULT FALSE
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.commit()
+# Загрузка рецептов
+def load_recipes():
+    try:
+        with open('recipes.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning("Файл recipes.json не найден")
+        return []
 
-    async def add_user(self, user_id: int, username: str):
-        """Добавление пользователя"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)',
-                (user_id, username or '')
-            )
-            conn.commit()
+RECIPES = load_recipes()
 
-    async def add_product(self, user_id: int, product_name: str, purchase_date: datetime) -> bool:
-        """Добавление продукта"""
-        if product_name not in PRODUCTS_DATA:
-            return False
+# Вспомогательные функции
+def create_safe_callback_data(product_name, product_id):
+    """Создает безопасный callback_data без спецсимволов"""
+    safe_name = re.sub(r'[^a-zA-Z0-9а-яА-Я]', '_', product_name)
+    return f"recipe_{safe_name}_{product_id}"
 
-        shelf_life = PRODUCTS_DATA[product_name]['shelf_life']
-        expiration_date = purchase_date + timedelta(days=shelf_life)
+def parse_callback_data(callback_data):
+    """Парсит callback_data и возвращает product_name и product_id"""
+    try:
+        parts = callback_data.split('_')
+        if len(parts) >= 3:
+            product_name = parts[1].replace('_', ' ')  # Восстанавливаем пробелы
+            product_id = parts[2]
+            return product_name, product_id
+        return None, None
+    except Exception as e:
+        logger.error(f"Ошибка парсинга callback_data: {e}")
+        return None, None
 
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO products (user_id, product_name, purchase_date, expiration_date)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, product_name, purchase_date.date(), expiration_date.date()))
-            conn.commit()
+async def recognize_product(photo_path: str) -> str:
+    """Заглушка для распознавания продукта"""
+    products = ["Молоко", "Хлеб", "Яйца", "Сыр", "Йогурт", "Мясо", "Рыба", "Овощи", "Фрукты"]
+    return random.choice(products)
 
-        return True
+def create_recipe_keyboard(product_name, product_id):
+    """Создает безопасную клавиатуру для рецептов"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Показать рецепт", callback_data=create_safe_callback_data(product_name, product_id))],
+        [InlineKeyboardButton("🔔 Напомнить позже", callback_data=f"remind_{product_id}")],
+        [InlineKeyboardButton("❌ Пропустить", callback_data="ignore")]
+    ])
 
-    async def get_user_products(self, user_id: int):
-        """Получение продуктов пользователя"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT product_name, purchase_date, expiration_date
-                FROM products
-                WHERE user_id = ?
-                ORDER BY expiration_date
-            ''', (user_id,))
-            return cursor.fetchall()
+def schedule_notification(product_id: int, user_id: int, product_name: str, expiration_days: int):
+    """Планирует уведомление за 1 день до истечения срока"""
+    try:
+        notify_time = datetime.now() + timedelta(days=expiration_days - 1)
+        job_id = f"notify_{user_id}_{product_id}"
+        
+        # Удаляем старую job если существует
+        try:
+            scheduler.remove_job(job_id)
+        except JobLookupError:
+            pass
+            
+        scheduler.add_job(
+            send_notification,
+            'date',
+            run_date=notify_time,
+            args=[user_id, product_name, product_id],
+            id=job_id
+        )
+        logger.info(f"Запланировано уведомление для продукта {product_id} пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка планирования уведомления: {e}")
 
-    async def get_products_count(self, user_id: int) -> int:
-        """Получение количества продуктов пользователя"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            return result[0] if result else 0
+async def send_notification(user_id: int, product_name: str, product_id: int):
+    """Отправляет уведомление о скором истечении срока"""
+    try:
+        from telegram import Bot
+        bot = Bot(token=TOKEN)
+        
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"⚠️ *{product_name}* испортится завтра!\nПопробуй приготовить что-нибудь? 👨‍🍳",
+            parse_mode='Markdown',
+            reply_markup=create_recipe_keyboard(product_name, product_id)
+        )
+        logger.info(f"Уведомление отправлено пользователю {user_id} для продукта {product_name}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
-    async def clear_user_products(self, user_id: int):
-        """Очистка продуктов пользователя"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
-            conn.commit()
+# Обработчики команд
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я — Freshly Bot 🤖\n"
+        "Я помогу тебе не выбрасывать еду — и никто не узнает, что у тебя в холодильнике.\n\n"
+        "📸 Отправь мне фото продукта — и я скажу, когда он испортится.\n"
+        "📋 Команды:\n"
+        "/list — показать все продукты\n"
+        "/expired — показать просроченные продукты\n"
+        "/clear — удалить все продукты"
+    )
 
-    async def get_expiring_products(self):
-        """Получение продуктов, срок которых истекает завтра"""
-        tomorrow = (datetime.now() + timedelta(days=1)).date()
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT p.user_id, u.username, p.product_name, p.expiration_date
-                FROM products p
-                JOIN users u ON p.user_id = u.user_id
-                WHERE p.expiration_date = ? AND p.notified = FALSE
-            ''', (tomorrow,))
-            return cursor.fetchall()
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.message.from_user.id
+        
+        # Создаем папку для фото если нет
+        os.makedirs("photos", exist_ok=True)
+        
+        # Скачиваем фото
+        photo_file = await update.message.photo[-1].get_file()
+        file_id = update.message.photo[-1].file_id
+        photo_hash = file_id[-10:]  # Простой хэш
+        photo_path = f"photos/photo_{user_id}_{photo_hash}.jpg"
+        await photo_file.download_to_drive(photo_path)
 
-    async def mark_as_notified(self, user_id: int, product_name: str):
-        """Пометить продукт как уведомленный"""
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE products
-                SET notified = TRUE
-                WHERE user_id = ? AND product_name = ?
-            ''', (user_id, product_name))
-            conn.commit()
-
-
-class FreshlyBot:
-    def __init__(self, token: str):
-        self.token = token
-        self.db = Database()
-        self.application: Application = None
-        self.scheduler = AsyncIOScheduler()
-
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /start"""
-        user = update.effective_user
-        await self.db.add_user(user.id, user.username)
-
-        welcome_text = f"""
-👋 Привет, {user.first_name}! Я Freshly Bot — твой помощник по отслеживанию сроков годности продуктов.
-
-📋 **Доступные команды:**
-/start - показать это сообщение  
-/list - список ваших продуктов
-/add - добавить продукт
-/clear - очистить все продукты
-
-🎯 Нажми на кнопку ниже, чтобы начать!
-        """
-
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить", callback_data="add_product")],
-            [InlineKeyboardButton("📋 Список", callback_data="list_products")],
-            [InlineKeyboardButton("🗑️ Очистить", callback_data="clear_products")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-
-    async def list_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Показать список продуктов"""
-        user = update.effective_user
-        products = await self.db.get_user_products(user.id)
-
-        if not products:
-            text = "📭 У вас нет добавленных продуктов."
-            if update.message:
-                await update.message.reply_text(text)
-            else:
-                await update.callback_query.message.reply_text(text)
+        # Распознаем продукт
+        product_name = await recognize_product(photo_path)
+        
+        if not product_name:
+            await update.message.reply_text("❌ Не удалось распознать продукт. Попробуйте снова!")
             return
 
-        message = "📋 **Ваши продукты:**\n\n"
-        today = datetime.now().date()
+        # Сохраняем продукт в БД
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        purchase_date = datetime.now().strftime('%Y-%m-%d')
+        expiration_days = random.randint(3, 14)  # Случайный срок годности
+        added_at = datetime.now().isoformat()
+        expires_at = (datetime.now() + timedelta(days=expiration_days)).strftime('%Y-%m-%d')
 
-        for product_name, purchase_date, expiration_date in products:
-            days_left = (expiration_date - today).days
+        cursor.execute('''
+            INSERT INTO products (user_id, name, purchase_date, expiration_days, added_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, product_name, purchase_date, expiration_days, added_at, expires_at))
+        product_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
 
-            if days_left < 0:
-                status = "🔴"
-                status_text = "ПРОСРОЧЕНО"
-            elif days_left == 0:
-                status = "🔴"
-                status_text = "Истекает сегодня"
-            elif days_left == 1:
-                status = "🟠"
-                status_text = "Истекает завтра"
-            elif days_left <= 3:
-                status = "🟡"
-                status_text = f"Истекает через {days_left} дня"
-            else:
-                status = "🟢"
-                status_text = f"Осталось {days_left} дней"
-
-            message += f"{status} **{product_name}**\n"
-            message += f"   📅 До {expiration_date}\n"
-            message += f"   ⏰ {status_text}\n\n"
-
-        products_count = await self.db.get_products_count(user.id)
-        message += f"📊 Всего продуктов: {products_count}/5"
-
-        if update.message:
-            await update.message.reply_text(message)
-        else:
-            await update.callback_query.message.reply_text(message)
-
-    async def clear_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Очистка всех продуктов"""
-        user = update.effective_user
-        await self.db.clear_user_products(user.id)
-
-        text = "✅ Все продукты удалены!"
-        if update.message:
-            await update.message.reply_text(text)
-        else:
-            await update.callback_query.message.reply_text(text)
-
-    async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Начало добавления продукта"""
-        user = update.effective_user
-        products_count = await self.db.get_products_count(user.id)
-        if products_count >= 5:
-            await update.message.reply_text(
-                "❌ Вы достигли лимита (5 продуктов). Используйте 🗑️ Очистить чтобы освободить место."
-            )
-            return ConversationHandler.END
-
-        products_list = "\n".join([f"• {product}" for product in PRODUCTS_DATA.keys()])
-        await update.message.reply_text(
-            f"📦 **Доступные продукты:**\n{products_list}\n\n"
-            "📝 Введите название продукта:"
-        )
-        return WAITING_PRODUCT
-
-    async def handle_product_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Обработка ввода продукта"""
-        product_name = update.message.text.lower().strip()
-
-        if product_name not in PRODUCTS_DATA:
-            await update.message.reply_text("❌ Продукт не найден. Попробуйте еще раз:")
-            return WAITING_PRODUCT
-
-        context.user_data['current_product'] = product_name
-
-        keyboard = [
-            [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
-            [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
-            [InlineKeyboardButton("⏪ 2 дня назад", callback_data="two_days_ago")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_product"),
-             InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Планируем уведомление
+        schedule_notification(product_id, user_id, product_name, expiration_days)
 
         await update.message.reply_text(
-            f"📦 Продукт: **{product_name}**\n"
-            "📆 Когда вы купили этот продукт?",
-            reply_markup=reply_markup
-        )
-        return WAITING_DATE
-
-    async def handle_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Обработка даты покупки"""
-        query = update.callback_query
-        await query.answer()
-
-        callback_data = query.data
-
-        if callback_data == "cancel":
-            await query.edit_message_text("❌ Операция отменена.")
-            return ConversationHandler.END
-
-        if callback_data == "back_to_product":
-            await query.edit_message_text("📝 Введите название продукта:")
-            return WAITING_PRODUCT
-
-        try:
-            if callback_data == "today":
-                purchase_date = datetime.now()
-            elif callback_data == "yesterday":
-                purchase_date = datetime.now() - timedelta(days=1)
-            elif callback_data == "two_days_ago":
-                purchase_date = datetime.now() - timedelta(days=2)
-            else:
-                await query.edit_message_text("❌ Пожалуйста, выберите дату из кнопок")
-                return WAITING_DATE
-
-            success = await self.db.add_product(query.from_user.id, context.user_data['current_product'], purchase_date)
-
-            if success:
-                shelf_life = PRODUCTS_DATA[context.user_data['current_product']]['shelf_life']
-                expiration_date = purchase_date + timedelta(days=shelf_life)
-                days_left = (expiration_date.date() - datetime.now().date()).days
-
-                await query.edit_message_text(
-                    f"✅ **{context.user_data['current_product']}** добавлен!\n"
-                    f"📅 Срок годности: {expiration_date.strftime('%d.%m.%Y')}\n"
-                    f"⏳ Осталось дней: {days_left}"
-                )
-            else:
-                await query.edit_message_text("❌ Ошибка при добавлении продукта")
-
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await query.edit_message_text("❌ Ошибка, попробуйте снова")
-            return ConversationHandler.END
-
-        return ConversationHandler.END
-
-    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Отмена текущей операции"""
-        await update.message.reply_text("❌ Операция отменена.")
-        return ConversationHandler.END
-
-    async def handle_menu_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик нажатий на главные инлайн-кнопки"""
-        query = update.callback_query
-        await query.answer()
-
-        if query.data == "add_product":
-            await query.message.reply_text("📝 Введите название продукта:")
-            return WAITING_PRODUCT
-        elif query.data == "list_products":
-            await self.list_products(update, context)
-        elif query.data == "clear_products":
-            await self.clear_products(update, context)
-
-    async def check_expiring_products(self):
-        """Проверка продуктов с истекающим сроком"""
-        try:
-            expiring_products = await self.db.get_expiring_products()
-
-            for user_id, username, product_name, expiration_date in expiring_products:
-                try:
-                    message = f"⚠️ Твой {product_name} испортится завтра!\n"
-                    category = PRODUCTS_DATA[product_name]['category']
-                    if category == "молочные":
-                        message += "🍳 Попробуй приготовить сырники или молочный коктейль!"
-                    elif category == "мясо":
-                        message += "🍳 Попробуй жаркое или гуляш!"
-                    elif category == "рыба":
-                        message += "🍳 Попробуй запеченную рыбу с овощами!"
-
-                    await self.application.bot.send_message(chat_id=user_id, text=message)
-                    await self.db.mark_as_notified(user_id, product_name)
-
-                except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
-
-        except Exception as e:
-            logger.error(f"Ошибка проверки продуктов: {e}")
-
-    def setup_handlers(self):
-        """Настройка обработчиков команд и кнопок"""
-        self.application.add_handler(CallbackQueryHandler(self.handle_menu_button, pattern=r"^(add_product|list_products|clear_products)$"))
-        self.application.add_handler(CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$"))
-
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('add', self.add_product_start)],
-            states={
-                WAITING_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)],
-                WAITING_DATE: [CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$")]
-            },
-            fallbacks=[
-                CommandHandler('cancel', self.cancel),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, self.cancel)
-            ],
-            # per_message=False по умолчанию — убираем предупреждение
+            f"✅ Распознал: *{product_name}*\n"
+            f"📅 Куплено: {purchase_date}\n"
+            f"⏳ Истекает: {expires_at} (через {expiration_days} дней)\n"
+            "🔔 Напомню за 1 день до истечения!",
+            parse_mode='Markdown'
         )
 
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("list", self.list_products))
-        self.application.add_handler(CommandHandler("clear", self.clear_products))
-        self.application.add_handler(conv_handler)
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при обработке фото")
 
-    def setup_scheduler(self):
-        """Настройка планировщика уведомлений"""
-        self.scheduler.add_job(
-            self.check_expiring_products,
-            trigger=CronTrigger(hour=10, minute=0),
-            id='daily_check'
-        )
-
-    async def run(self):
-        """Запуск бота и планировщика в существующем event loop"""
-        try:
-            self.application = Application.builder().token(self.token).build()
-            self.setup_handlers()
-            self.setup_scheduler()
-            self.scheduler.start()
-            logger.info("🚀 Бот запускается...")
-
-            await self.application.initialize()
-            logger.info("Intialized application.")
-
-            await self.application.updater.start_polling()
-            logger.info("Started polling.")
-
-            await self.application.start()
-            logger.info("Application started.")
-
-            # Ждём бесконечно
-            while True:
-                await asyncio.sleep(3600)
-
-        except asyncio.CancelledError:
-            logger.info("🔄 Получен сигнал отмены задачи.")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка в run(): {e}")
-            raise
-
-
-async def main():
-    """Основная функция"""
-    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-
-    if not BOT_TOKEN:
-        logger.error("❌ Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN в Render.")
-        return
-
-    if BOT_TOKEN == "TELEGRAM_BOT_TOKEN" or "YOUR_TOKEN" in BOT_TOKEN:
-        logger.error("❌ В переменной TELEGRAM_BOT_TOKEN указан шаблон, а не настоящий токен!")
-        logger.error("🔑 Пример настоящего токена: 1234567890:AAF9gXeJ...")
-        return
-
-    bot = FreshlyBot(BOT_TOKEN)
-
-    # Graceful shutdown при SIGTERM (Render) или SIGINT (Ctrl+C)
-    def stop_scheduler(signum, frame):
-        logger.info("🛑 Получен сигнал остановки. Останавливаем планировщик...")
-        if hasattr(bot, 'scheduler') and bot.scheduler.running:
-            bot.scheduler.shutdown(wait=False)
-            logger.info("⏹️ Планировщик остановлен.")
-
-    signal.signal(signal.SIGINT, stop_scheduler)
-    signal.signal(signal.SIGTERM, stop_scheduler)
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
     try:
-        await bot.run()
-    except KeyboardInterrupt:
-        logger.info("🛑 Получен KeyboardInterrupt.")
-    finally:
-        logger.info("🔧 Начинаем graceful shutdown...")
+        if query.data == "ignore":
+            await query.edit_message_text("Хорошо, напомню в следующий раз 😉")
+            
+        elif query.data.startswith("remind_"):
+            # Переносим напоминание на завтра
+            product_id = query.data.split('_')[1]
+            await query.edit_message_text("🔔 Напомню через день! ⏰")
+            
+        elif query.data.startswith("recipe_"):
+            product_name, product_id = parse_callback_data(query.data)
+            
+            if not product_name:
+                await query.edit_message_text("❌ Ошибка обработки запроса")
+                return
 
-        if bot.application:
-            if bot.application.updater and bot.application.updater.running:
+            # Ищем рецепт (простой поиск по имени)
+            recipe = None
+            for r in RECIPES:
+                if r.get('name', '').lower() == product_name.lower():
+                    recipe = r
+                    break
+
+            if recipe:
+                # Форматируем рецепт
+                ingredients = ", ".join(recipe.get('ingredients', []))
+                steps = "\n".join([f"{i+1}. {step}" for i, step in enumerate(recipe.get('steps', []))])
+                
+                recipe_text = (
+                    f"👩‍🍳 *{recipe['name']}*\n\n"
+                    f"⏱️ Время приготовления: {recipe.get('time_minutes', 'N/A')} мин\n"
+                    f"🍽️ Количество порций: {recipe.get('servings', 'N/A')}\n\n"
+                    f"*Ингредиенты:*\n{ingredients}\n\n"
+                    f"*Шаги приготовления:*\n{steps}"
+                )
+                
+                await query.edit_message_text(
+                    recipe_text,
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+                    ]])
+                )
+            else:
+                await query.edit_message_text(
+                    f"📚 Рецепт для *{product_name}* не найден 😔\n\n"
+                    "Попробуйте поискать в интернете или придумать свой рецепт!",
+                    parse_mode='Markdown'
+                )
+                
+        elif query.data == "back_to_main":
+            await query.edit_message_text(
+                "🔔 Я напомню о других продуктах вовремя! 😊",
+                reply_markup=None
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка в button_handler: {e}")
+        try:
+            await query.edit_message_text("❌ Произошла ошибка при обработке запроса")
+        except:
+            pass
+
+async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.message.from_user.id
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT name, purchase_date, expiration_days, expires_at, notified 
+            FROM products WHERE user_id = ? ORDER BY expires_at
+        ''', (user_id,))
+        products = cursor.fetchall()
+        conn.close()
+
+        if not products:
+            await update.message.reply_text("📦 Пока нет продуктов. Отправь фото — и я добавлю!")
+            return
+
+        text = "📋 *Твои продукты:*\n\n"
+        today = datetime.now().date()
+        
+        for name, purchase_date, exp_days, expires_at, notified in products:
+            expires_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
+            days_left = (expires_date - today).days
+            
+            if days_left < 0:
+                status = "🔴 ПРОСРОЧЕНО"
+            elif days_left == 0:
+                status = "🔴 Истекает сегодня!"
+            elif days_left == 1:
+                status = "🟠 Истекает завтра"
+            elif days_left <= 3:
+                status = f"🟡 Истекает через {days_left} дня"
+            else:
+                status = f"🟢 Ещё {days_left} дней"
+                
+            text += f"• *{name}* — {status}\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в list_products: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при загрузке списка продуктов")
+
+async def show_expired(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает просроченные продукты"""
+    try:
+        user_id = update.message.from_user.id
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT name, expires_at FROM products 
+            WHERE user_id = ? AND expires_at <= ? AND notified = FALSE
+            ORDER BY expires_at
+        ''', (user_id, today))
+        
+        expired_products = cursor.fetchall()
+        conn.close()
+
+        if not expired_products:
+            await update.message.reply_text("✅ Просроченных продуктов нет!")
+            return
+        
+        text = "🚨 *Просроченные продукты:*\n\n"
+        for name, expires_at in expired_products:
+            text += f"• *{name}* - истек {expires_at}\n"
+        
+        text += "\n❌ Рекомендуем выбросить эти продукты!"
+        await update.message.reply_text(text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в show_expired: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при загрузке просроченных продуктов")
+
+async def clear_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.message.from_user.id
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+        # Удаляем все запланированные уведомления пользователя
+        for job in scheduler.get_jobs():
+            if job.id.startswith(f"notify_{user_id}_"):
                 try:
-                    await bot.application.updater.stop()
-                    logger.info("⏹️ Updater остановлен.")
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка при остановке updater: {e}")
+                    scheduler.remove_job(job.id)
+                except JobLookupError:
+                    pass
 
-            if bot.application.running:
-                try:
-                    await bot.application.stop()
-                    await bot.application.shutdown()
-                    logger.info("⏹️ Application остановлен и завершён.")
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка при остановке application: {e}")
+        await update.message.reply_text("🗑️ Все продукты удалены!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в clear_products: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при удалении продуктов")
 
-        if hasattr(bot, 'scheduler') and bot.scheduler.running:
+async def check_expired_products():
+    """Ежедневная проверка просроченных продуктов"""
+    try:
+        from telegram import Bot
+        bot = Bot(token=TOKEN)
+        
+        conn = sqlite3.connect('products.db')
+        cursor = conn.cursor()
+        
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT DISTINCT user_id FROM products 
+            WHERE expires_at <= ? AND notified = FALSE
+        ''', (today,))
+        
+        expired_users = cursor.fetchall()
+        
+        for (user_id,) in expired_users:
             try:
-                bot.scheduler.shutdown(wait=False)
-                logger.info("⏹️ Планировщик остановлен.")
+                cursor.execute('''
+                    SELECT name, expires_at FROM products 
+                    WHERE user_id = ? AND expires_at <= ? AND notified = FALSE
+                ''', (user_id, today))
+                
+                expired_products = cursor.fetchall()
+                if expired_products:
+                    product_list = "\n".join([f"• {name} (истек {expires_at})" for name, expires_at in expired_products])
+                    
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=f"🚨 *Просроченные продукты:*\n{product_list}\n\nРекомендуем выбросить!",
+                        parse_mode='Markdown'
+                    )
+                    
+                    # Помечаем как уведомленные
+                    cursor.execute('''
+                        UPDATE products SET notified = TRUE 
+                        WHERE user_id = ? AND expires_at <= ?
+                    ''', (user_id, today))
+                    
             except Exception as e:
-                logger.warning(f"⚠️ Ошибка при остановке планировщика: {e}")
+                logger.error(f"Ошибка уведомления пользователя {user_id}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в check_expired_products: {e}")
 
-        logger.info("✅ Бот полностью остановлен.")
+def main():
+    try:
+        application = Application.builder().token(TOKEN).build()
 
+        # Добавляем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("list", list_products))
+        application.add_handler(CommandHandler("clear", clear_products))
+        application.add_handler(CommandHandler("expired", show_expired))
+        application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        application.add_handler(CallbackQueryHandler(button_handler))
 
-# --- HTTP-сервер для Render (чтобы сервис считался "живым") ---
-app = Flask(__name__)
+        # Планируем ежедневную проверку в 9:00
+        scheduler.add_job(
+            check_expired_products,
+            'cron',
+            hour=9,
+            minute=0,
+            id='daily_expired_check'
+        )
 
-@app.route('/')
-def home():
-    return "✅ FreshlyBot is running!", 200
+        logger.info("🚀 Бот запущен...")
+        application.run_polling()
 
-def run_flask_server():
-    port = int(os.environ.get('PORT', 10000))  # Render требует PORT
-    app.run(host='0.0.0.0', port=port)
-
-# Запускаем Flask в отдельном потоке
-flask_thread = threading.Thread(target=run_flask_server)
-flask_thread.daemon = True  # Завершится вместе с основным потоком
-flask_thread.start()
-# --- Конец HTTP-сервера ---
-
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+    finally:
+        scheduler.shutdown()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
