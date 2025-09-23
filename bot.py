@@ -3,7 +3,9 @@ import logging
 import sqlite3
 import asyncio
 import signal
+import threading
 from datetime import datetime, timedelta
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -184,7 +186,11 @@ class FreshlyBot:
         products = await self.db.get_user_products(user.id)
 
         if not products:
-            await update.message.reply_text("📭 У вас нет добавленных продуктов.")
+            text = "📭 У вас нет добавленных продуктов."
+            if update.message:
+                await update.message.reply_text(text)
+            else:
+                await update.callback_query.message.reply_text(text)
             return
 
         message = "📋 **Ваши продукты:**\n\n"
@@ -215,13 +221,22 @@ class FreshlyBot:
 
         products_count = await self.db.get_products_count(user.id)
         message += f"📊 Всего продуктов: {products_count}/5"
-        await update.message.reply_text(message)
+
+        if update.message:
+            await update.message.reply_text(message)
+        else:
+            await update.callback_query.message.reply_text(message)
 
     async def clear_products(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Очистка всех продуктов"""
         user = update.effective_user
         await self.db.clear_user_products(user.id)
-        await update.message.reply_text("✅ Все продукты удалены!")
+
+        text = "✅ Все продукты удалены!"
+        if update.message:
+            await update.message.reply_text(text)
+        else:
+            await update.callback_query.message.reply_text(text)
 
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало добавления продукта"""
@@ -372,7 +387,7 @@ class FreshlyBot:
                 CommandHandler('cancel', self.cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self.cancel)
             ],
-            per_message=True,  # ← Убирает предупреждение PTB
+            # per_message=False по умолчанию — убираем предупреждение
         )
 
         self.application.add_handler(CommandHandler("start", self.start))
@@ -397,21 +412,18 @@ class FreshlyBot:
             self.scheduler.start()
             logger.info("🚀 Бот запускается...")
 
-            # Инициализация
             await self.application.initialize()
             logger.info("Intialized application.")
 
-            # Запуск получения обновлений
             await self.application.updater.start_polling()
             logger.info("Started polling.")
 
-            # Запуск обработки
             await self.application.start()
             logger.info("Application started.")
 
             # Ждём бесконечно
             while True:
-                await asyncio.sleep(3600)  # Спим 1 час
+                await asyncio.sleep(3600)
 
         except asyncio.CancelledError:
             logger.info("🔄 Получен сигнал отмены задачи.")
@@ -426,7 +438,12 @@ async def main():
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
     if not BOT_TOKEN:
-        logger.error("Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+        logger.error("❌ Токен бота не найден! Установите переменную TELEGRAM_BOT_TOKEN в Render.")
+        return
+
+    if BOT_TOKEN == "TELEGRAM_BOT_TOKEN" or "YOUR_TOKEN" in BOT_TOKEN:
+        logger.error("❌ В переменной TELEGRAM_BOT_TOKEN указан шаблон, а не настоящий токен!")
+        logger.error("🔑 Пример настоящего токена: 1234567890:AAF9gXeJ...")
         return
 
     bot = FreshlyBot(BOT_TOKEN)
@@ -449,7 +466,6 @@ async def main():
         logger.info("🔧 Начинаем graceful shutdown...")
 
         if bot.application:
-            # Останавливаем updater, только если он запущен
             if bot.application.updater and bot.application.updater.running:
                 try:
                     await bot.application.updater.stop()
@@ -457,7 +473,6 @@ async def main():
                 except Exception as e:
                     logger.warning(f"⚠️ Ошибка при остановке updater: {e}")
 
-            # Останавливаем приложение, только если оно запущено
             if bot.application.running:
                 try:
                     await bot.application.stop()
@@ -466,7 +481,6 @@ async def main():
                 except Exception as e:
                     logger.warning(f"⚠️ Ошибка при остановке application: {e}")
 
-        # Дополнительная проверка планировщика
         if hasattr(bot, 'scheduler') and bot.scheduler.running:
             try:
                 bot.scheduler.shutdown(wait=False)
@@ -475,6 +489,24 @@ async def main():
                 logger.warning(f"⚠️ Ошибка при остановке планировщика: {e}")
 
         logger.info("✅ Бот полностью остановлен.")
+
+
+# --- HTTP-сервер для Render (чтобы сервис считался "живым") ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ FreshlyBot is running!", 200
+
+def run_flask_server():
+    port = int(os.environ.get('PORT', 10000))  # Render требует PORT
+    app.run(host='0.0.0.0', port=port)
+
+# Запускаем Flask в отдельном потоке
+flask_thread = threading.Thread(target=run_flask_server)
+flask_thread.daemon = True  # Завершится вместе с основным потоком
+flask_thread.start()
+# --- Конец HTTP-сервера ---
 
 
 if __name__ == '__main__':
