@@ -24,7 +24,10 @@ from apscheduler.triggers.cron import CronTrigger
 # Логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Убедимся, что логи идут в stdout, который Render перехватывает
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -191,7 +194,8 @@ class Database:
     async def add_product(self, user_id: int, product_name: str, purchase_date: datetime) -> bool:
         """Добавление продукта"""
         products_data = ProductManager.get_products_data()
-        if product_name not in products_data:  # ← ИСПРАВЛЕНО!
+        if product_name not in products_data:  # ← ИСПРАВЛЕНО: products_ -> products_data
+            logger.warning(f"Попытка добавить неизвестный продукт: {product_name}")
             return False
 
         shelf_life = products_data[product_name]['shelf_life']
@@ -267,22 +271,33 @@ class FreshlyBot:
         self._shutdown = False
 
     def setup_signal_handlers(self):
-        """Настройка обработчиков сигналов для graceful shutdown"""
+        """Настройка обработчиков сигналов для graceful shutdown на Render"""
         async def shutdown_sequence():
-            logger.info("Запуск graceful shutdown...")
-            if self.application:
-                await self.application.stop()
-            if self.scheduler.running:
-                self.scheduler.shutdown()
-            logger.info("Бот остановлен корректно.")
-            sys.exit(0)
+            """Асинхронная последовательность завершения работы"""
+            logger.info("🚀 Запуск graceful shutdown...")
+            try:
+                if self.application:
+                    await self.application.stop()
+                    logger.info("✅ Telegram Application остановлен.")
+                if self.scheduler.running:
+                    self.scheduler.shutdown()
+                    logger.info("✅ Scheduler остановлен.")
+            except Exception as e:
+                logger.error(f"❌ Ошибка во время graceful shutdown: {e}")
+            finally:
+                logger.info("⏹️ Бот остановлен корректно. Готов к завершению процесса.")
 
         def signal_handler(signum, frame):
-            logger.info(f"Получен сигнал {signum}, завершение работы...")
+            """Синхронный обработчик, запускающий асинхронное завершение"""
+            sig_name = signal.Signals(signum).name
+            logger.info(f"📬 Получен сигнал {sig_name} ({signum}), инициируем graceful shutdown...")
+            # Создаем задачу для асинхронного завершения. Event loop сам дождется ее завершения.
             asyncio.create_task(shutdown_sequence())
 
+        # Регистрируем обработчики
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+        logger.info("✅ Обработчики сигналов SIGINT и SIGTERM зарегистрированы.")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработчик команды /start"""
@@ -760,9 +775,10 @@ class FreshlyBot:
         self.setup_scheduler()
         
         self.scheduler.start()
-        logger.info("🚀 Бот запущен")
-        
+        logger.info("🚀 Бот запущен и готов принимать запросы.")
+
         try:
+            # Этот вызов блокирует выполнение до получения SIGTERM/SIGINT
             self.application.run_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
@@ -772,11 +788,12 @@ class FreshlyBot:
             logger.error(f"Конфликт: {e}")
             logger.info("⚠️  Возможно, уже запущен другой экземпляр бота")
         except Exception as e:
-            logger.error(f"Ошибка запуска: {e}")
+            logger.error(f"Необработанная ошибка: {e}")
         finally:
+            # Этот блок выполнится после выхода из run_polling
             if self.scheduler.running:
                 self.scheduler.shutdown()
-            logger.info("⏹️ Бот остановлен")
+            logger.info("⏹️ Основной цикл бота завершен.")
 
 def main():
     """Основная функция"""
@@ -787,7 +804,7 @@ def main():
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     if not BOT_TOKEN:
         logger.error("❌ Установите переменную окружения TELEGRAM_BOT_TOKEN")
-        return
+        sys.exit(1)  # Явный выход с ошибкой, если токен не задан
     
     try:
         import psutil
@@ -800,8 +817,10 @@ def main():
     except (ImportError, psutil.NoSuchProcess, psutil.TimeoutExpired):
         pass
     
+    logger.info("🔧 Инициализация бота...")
     bot = FreshlyBot(BOT_TOKEN)
     bot.run()
+    logger.info("👋 Скрипт bot.py завершил свою работу.")
 
 if __name__ == '__main__':
     main()
