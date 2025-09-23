@@ -202,7 +202,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
     if expiration_days < 0:
         await update.message.reply_text(
-            "❌ *Ошибка:* Дата истечения не может быть раньше даты покупки.\n"
+            "❌ *Ошибка:* Дата истечения не может быть раньше дату покупки.\n"
             "Пожалуйста, начните заново.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
@@ -259,7 +259,7 @@ async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
-    return PHOTO_RECOGNITION  # Переходим в состояние ожидания фото
+    return PHOTO_RECOGNITION
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает фото и начинает запрос даты покупки."""
@@ -291,12 +291,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             reply_markup=get_cancel_keyboard()
         )
 
-        return CHOOSING_PURCHASE_DATE  # Продолжаем диалог
+        return CHOOSING_PURCHASE_DATE
 
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {e}")
         await update.message.reply_text("❌ Произошла ошибка при обработке фото", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
+
+async def handle_text_in_photo_recognition(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает текстовые сообщения в состоянии ожидания фото."""
+    user_input = update.message.text.strip()
+    
+    if user_input in ["❌ Отмена", "🏠 Главное меню"]:
+        await cancel(update, context)
+        return ConversationHandler.END
+        
+    await update.message.reply_text(
+        "📸 Пожалуйста, отправьте фото продукта для распознавания.\n"
+        "Или нажмите '❌ Отмена' для выхода.",
+        reply_markup=get_cancel_keyboard()
+    )
+    return PHOTO_RECOGNITION
 
 # --- Основные команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,28 +607,60 @@ def main():
     try:
         application = Application.builder().token(TOKEN).build()
 
-        conv_handler = ConversationHandler(
+        # Обработчик для добавления вручную
+        manual_conv_handler = ConversationHandler(
             entry_points=[
-                CommandHandler("start", start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice),
+                MessageHandler(filters.Regex("^✍️ Добавить вручную$"), start_add_manually),
             ],
             states={
-                PHOTO_RECOGNITION: [MessageHandler(filters.PHOTO, handle_photo)],
-                CHOOSING_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_product_name)],
-                CHOOSING_PURCHASE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)],
-                CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
+                CHOOSING_PRODUCT_NAME: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_product_name)
+                ],
+                CHOOSING_PURCHASE_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)
+                ],
+                CHOOSING_EXPIRATION_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)
+                ],
             },
             fallbacks=[
                 MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
-                MessageHandler(filters.Regex("^🏠 Главное меню$"), show_main_menu)
+                CommandHandler("start", show_main_menu)
             ],
             allow_reentry=True
         )
 
-        application.add_handler(conv_handler)
+        # Обработчик для добавления по фото
+        photo_conv_handler = ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex("^📸 Добавить по фото$"), start_add_by_photo),
+            ],
+            states={
+                PHOTO_RECOGNITION: [
+                    MessageHandler(filters.PHOTO, handle_photo),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_in_photo_recognition)
+                ],
+                CHOOSING_PURCHASE_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_purchase_date)
+                ],
+                CHOOSING_EXPIRATION_DATE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)
+                ],
+            },
+            fallbacks=[
+                MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
+                CommandHandler("start", show_main_menu)
+            ],
+            allow_reentry=True
+        )
 
-        # Убираем отдельный обработчик фото — он теперь в состоянии PHOTO_RECOGNITION
-        # application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # <-- УДАЛЯЕМ ЭТУ СТРОКУ
+        # Добавляем обработчики
+        application.add_handler(manual_conv_handler)
+        application.add_handler(photo_conv_handler)
+        
+        # Обработчик главного меню и команды start
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
+        application.add_handler(CommandHandler("start", start))
 
         scheduler.add_job(
             check_expired_products,
