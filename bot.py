@@ -37,13 +37,14 @@ PRODUCTS_DATA = {
     "хлеб": {"shelf_life": 5, "category": "хлеб"},
 }
 
+
 class Database:
     def __init__(self):
         self.init_db()
 
     def init_db(self):
         """Инициализация базы данных SQLite"""
-        with sqlite3.connect('products.db') as conn:  # ← Убрали check_same_thread=False
+        with sqlite3.connect('products.db') as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS products (
@@ -168,7 +169,6 @@ class FreshlyBot:
 🎯 Нажми на кнопку ниже, чтобы начать!
         """
 
-        # Инлайн-кнопки
         keyboard = [
             [InlineKeyboardButton("➕ Добавить", callback_data="add_product")],
             [InlineKeyboardButton("📋 Список", callback_data="list_products")],
@@ -226,8 +226,6 @@ class FreshlyBot:
     async def add_product_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало добавления продукта"""
         user = update.effective_user
-
-        # Проверка лимита
         products_count = await self.db.get_products_count(user.id)
         if products_count >= 5:
             await update.message.reply_text(
@@ -235,14 +233,11 @@ class FreshlyBot:
             )
             return ConversationHandler.END
 
-        # Список доступных продуктов
         products_list = "\n".join([f"• {product}" for product in PRODUCTS_DATA.keys()])
-
         await update.message.reply_text(
             f"📦 **Доступные продукты:**\n{products_list}\n\n"
             "📝 Введите название продукта:"
         )
-
         return WAITING_PRODUCT
 
     async def handle_product_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -255,7 +250,6 @@ class FreshlyBot:
 
         context.user_data['current_product'] = product_name
 
-        # Кнопки для выбора даты — инлайн
         keyboard = [
             [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
             [InlineKeyboardButton("⏪ Вчера", callback_data="yesterday")],
@@ -270,7 +264,6 @@ class FreshlyBot:
             "📆 Когда вы купили этот продукт?",
             reply_markup=reply_markup
         )
-
         return WAITING_DATE
 
     async def handle_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -299,7 +292,6 @@ class FreshlyBot:
                 await query.edit_message_text("❌ Пожалуйста, выберите дату из кнопок")
                 return WAITING_DATE
 
-            # Добавляем продукт
             success = await self.db.add_product(query.from_user.id, context.user_data['current_product'], purchase_date)
 
             if success:
@@ -333,13 +325,10 @@ class FreshlyBot:
         await query.answer()
 
         if query.data == "add_product":
-            # Запускаем диалог добавления продукта
             await query.message.reply_text("📝 Введите название продукта:")
             return WAITING_PRODUCT
-
         elif query.data == "list_products":
             await self.list_products(update, context)
-
         elif query.data == "clear_products":
             await self.clear_products(update, context)
 
@@ -351,8 +340,6 @@ class FreshlyBot:
             for user_id, username, product_name, expiration_date in expiring_products:
                 try:
                     message = f"⚠️ Твой {product_name} испортится завтра!\n"
-
-                    # Предлагаем рецепт
                     category = PRODUCTS_DATA[product_name]['category']
                     if category == "молочные":
                         message += "🍳 Попробуй приготовить сырники или молочный коктейль!"
@@ -361,11 +348,7 @@ class FreshlyBot:
                     elif category == "рыба":
                         message += "🍳 Попробуй запеченную рыбу с овощами!"
 
-                    await self.application.bot.send_message(
-                        chat_id=user_id,
-                        text=message
-                    )
-
+                    await self.application.bot.send_message(chat_id=user_id, text=message)
                     await self.db.mark_as_notified(user_id, product_name)
 
                 except Exception as e:
@@ -376,33 +359,22 @@ class FreshlyBot:
 
     def setup_handlers(self):
         """Настройка обработчиков команд и кнопок"""
-
-        # Обработчик главного меню (инлайн-кнопки после /start)
         self.application.add_handler(CallbackQueryHandler(self.handle_menu_button, pattern=r"^(add_product|list_products|clear_products)$"))
-
-        # Обработчик выбора даты
         self.application.add_handler(CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$"))
 
-        # ConversationHandler для добавления продукта
         conv_handler = ConversationHandler(
-            entry_points=[
-                CommandHandler('add', self.add_product_start),
-            ],
+            entry_points=[CommandHandler('add', self.add_product_start)],
             states={
-                WAITING_PRODUCT: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)
-                ],
-                WAITING_DATE: [
-                    CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$")
-                ]
+                WAITING_PRODUCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_product_input)],
+                WAITING_DATE: [CallbackQueryHandler(self.handle_date, pattern=r"^(today|yesterday|two_days_ago|back_to_product|cancel)$")]
             },
             fallbacks=[
                 CommandHandler('cancel', self.cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self.cancel)
-            ]
+            ],
+            per_message=True,  # ← Убирает предупреждение PTB
         )
 
-        # Регистрируем обработчики
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("list", self.list_products))
         self.application.add_handler(CommandHandler("clear", self.clear_products))
@@ -410,7 +382,6 @@ class FreshlyBot:
 
     def setup_scheduler(self):
         """Настройка планировщика уведомлений"""
-        # Проверка каждый день в 10:00
         self.scheduler.add_job(
             self.check_expiring_products,
             trigger=CronTrigger(hour=10, minute=0),
@@ -418,13 +389,25 @@ class FreshlyBot:
         )
 
     async def run(self):
-        """Запуск бота и планировщика"""
+        """Запуск бота и планировщика в существующем event loop"""
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         self.setup_scheduler()
         self.scheduler.start()
         logger.info("🚀 Бот запускается...")
-        await self.application.run_polling()
+
+        # Инициализация и запуск
+        await self.application.initialize()
+        await self.application.updater.start_polling()
+        await self.application.start()
+
+        # Ждём завершения (например, по Ctrl+C)
+        # В продакшене на Render — просто держим бота запущенным
+        try:
+            while True:
+                await asyncio.sleep(3600)  # Спим 1 час, чтобы не грузить CPU
+        except asyncio.CancelledError:
+            pass  # Это нормально при остановке
 
 
 async def main():
@@ -437,7 +420,7 @@ async def main():
 
     bot = FreshlyBot(BOT_TOKEN)
 
-    # Graceful shutdown при Ctrl+C
+    # Graceful shutdown при Ctrl+C или SIGTERM (например, при перезапуске на Render)
     def stop_scheduler(signum, frame):
         logger.info("🛑 Остановка планировщика...")
         bot.scheduler.shutdown(wait=False)
@@ -445,7 +428,16 @@ async def main():
     signal.signal(signal.SIGINT, stop_scheduler)
     signal.signal(signal.SIGTERM, stop_scheduler)
 
-    await bot.run()
+    try:
+        await bot.run()
+    except KeyboardInterrupt:
+        logger.info("🛑 Получен сигнал завершения. Останавливаем бота...")
+    finally:
+        if bot.application:
+            await bot.application.updater.stop()
+            await bot.application.stop()
+            await bot.application.shutdown()
+        logger.info("✅ Бот остановлен.")
 
 
 if __name__ == '__main__':
