@@ -1,0 +1,30 @@
+version: "1"
+
+services:
+  freshly-bot:
+    type: app
+    runtime: python
+    build:
+      command: |
+        pip install -r requirements.txt
+        # Создаём папку для фото и базы при сборке
+        mkdir -p photos
+    run:
+      command: python bot.py
+      port: 8080
+    env:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+    healthcheck:
+      path: /health
+      timeout: 10s
+      interval: 30s
+      retries: 3
+
+variables:
+  TELEGRAM_BOT_TOKEN:
+    required: true
+    description: 8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA
+  WEBHOOK_URL:
+    required: true
+    description: https://freshly.amvera.run
