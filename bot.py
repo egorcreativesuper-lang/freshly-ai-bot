@@ -825,12 +825,12 @@ async def main():
         # Запускаем health check сервер
         start_health_check()
         
-        # Восстанавливаем уведомления
-        restore_scheduled_notifications(bot)
-
         # Инициализируем бота
         application = Application.builder().token(TOKEN).build()
-        bot = application.bot  # ← Глобальный бот для асинхронных задач
+        bot = application.bot  # ← bot создаётся ЗДЕСЬ!
+
+        # ✅ ТОЛЬКО ПОСЛЕ создания bot — вызываем restore_scheduled_notifications!
+        restore_scheduled_notifications(bot)
 
         # Обработчики
         manual_conv_handler = ConversationHandler(
