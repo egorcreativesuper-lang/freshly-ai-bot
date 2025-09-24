@@ -1,6 +1,6 @@
 app:
   name: "Freshly-Bot"
-  runtime: "python3.12"  # ← ВАЖНО: ТОЛЬКО 3.12!
+  runtime: "python3.12"
 
   include:
     - "bot.py"
@@ -23,7 +23,7 @@ app:
 
   env:
     TELEGRAM_BOT_TOKEN: "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
-    WEBHOOK_URL: "https://amvera-freshly-run-freshly.amvera.io"  # ← БЕЗ ПРОБЕЛОВ!
+    WEBHOOK_URL: "https://amvera-freshly-run-freshly.amvera.io"  # ← НИКАКИХ ПРОБЕЛОВ!
     HEALTH_CHECK_PORT: "8081"
 
   domain: "amvera-freshly-run-freshly"
