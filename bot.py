@@ -7,7 +7,8 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler  # ← ИСПРАВЛЕНО: Асинхронный планировщик
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.base import JobLookupError  # ← ИСПРАВЛЕНО: Импорт для JobLookupError
 import json
 from functools import wraps, partial
 import threading
@@ -41,7 +42,7 @@ if not WEBHOOK_URL:
     exit(1)
 
 # Инициализация планировщика
-scheduler = AsyncIOScheduler()  # ← ИСПРАВЛЕНО: Асинхронный!
+scheduler = AsyncIOScheduler()
 scheduler.start()
 
 # Health Check Server
@@ -165,7 +166,7 @@ def parse_date(date_str: str):
     return None
 
 # Восстановление уведомлений при перезапуске
-def restore_scheduled_notifications():
+def restore_scheduled_notifications(bot):
     """Восстановление уведомлений при перезапуске бота"""
     try:
         conn = get_db_connection()
@@ -187,17 +188,16 @@ def restore_scheduled_notifications():
             days_left = (expires_date - today).days
             
             if days_left > 0:
-                # Проверяем, не запланирована ли уже задача
                 job_id = f"notify_{user_id}_{product_id}"
                 try:
                     scheduler.get_job(job_id)
                     logger.info(f"⏭️ Уведомление для продукта {product_id} уже запланировано — пропускаем")
                     continue
-                except:
+                except JobLookupError:
                     pass
                 
-                # Планируем уведомление
-                asyncio.create_task(schedule_notification_async(product_id, user_id, name, days_left))
+                # Планируем уведомление асинхронно
+                asyncio.create_task(schedule_notification_async(product_id, user_id, name, days_left, bot))
                 restored_count += 1
         
         conn.close()
@@ -379,7 +379,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         conn.close()
 
         # Планируем уведомление асинхронно
-        await schedule_notification_async(product_id, user_id, product_name, expiration_days)
+        await schedule_notification_async(product_id, user_id, product_name, expiration_days, bot)  # ← bot передаётся из main()
 
         success_text = (
             f"🎉 *Ура! Продукт добавлен!*\n\n"
@@ -636,7 +636,7 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
                 try:
                     scheduler.remove_job(job.id)
                 except JobLookupError:
-                    pass
+                    pass  # Уже удалено — нормально
 
         await update.message.reply_text(
             "🗑️ *Все продукты удалены!*", 
@@ -705,7 +705,7 @@ async def send_notification(bot, user_id: int, product_name: str, product_id: in
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
 
-async def schedule_notification_async(product_id: int, user_id: int, product_name: str, expiration_days: int):
+async def schedule_notification_async(product_id: int, user_id: int, product_name: str, expiration_days: int, bot):
     """Асинхронная функция для планирования уведомления через AsyncIOScheduler"""
     try:
         if expiration_days <= 1:
@@ -723,12 +723,15 @@ async def schedule_notification_async(product_id: int, user_id: int, product_nam
         except JobLookupError:
             pass
         
+        # Создаём обёртку, чтобы передать bot в send_notification
+        async def wrapped_send():
+            await send_notification(bot, user_id, product_name, product_id)
+        
         # Планируем задачу
         scheduler.add_job(
-            send_notification,
+            wrapped_send,
             'date',
             run_date=notify_time,
-            args=[bot, user_id, product_name, product_id],  # ← Передаём bot
             id=job_id
         )
         logger.info(f"✅ Запланировано уведомление для продукта {product_id} пользователя {user_id}")
@@ -819,12 +822,12 @@ async def main():
         # Запускаем health check сервер
         start_health_check()
         
-        # Восстанавливаем уведомления
-        restore_scheduled_notifications()
-
         # Инициализируем бота
         application = Application.builder().token(TOKEN).build()
         bot = application.bot  # ← Глобальный бот для асинхронных задач
+
+        # ТОЛЬКО ПОСЛЕ инициализации bot — восстанавливаем уведомления
+        restore_scheduled_notifications(bot)
 
         # Обработчики
         manual_conv_handler = ConversationHandler(
@@ -876,11 +879,10 @@ async def main():
             id='daily_expired_check'
         )
 
-        # Устанавливаем вебхук — run_webhook сделает это автоматически
+        # Устанавливаем вебхук
         PORT = int(os.environ.get('PORT', 8080))
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
         
-        # Запускаем бота через вебхук
         await application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
