@@ -825,11 +825,11 @@ async def main():
         # Запускаем health check сервер
         start_health_check()
         
-        # Инициализируем бота
+        # ✅ СНАЧАЛА создаём application и bot!
         application = Application.builder().token(TOKEN).build()
-        bot = application.bot  # ← bot создаётся ЗДЕСЬ!
+        bot = application.bot  # ← bot создан здесь!
 
-        # ✅ ТОЛЬКО ПОСЛЕ создания bot — вызываем restore_scheduled_notifications!
+        # ✅ ТОЛЬКО ПОСЛЕ этого — вызываем функцию с bot!
         restore_scheduled_notifications(bot)
 
         # Обработчики
