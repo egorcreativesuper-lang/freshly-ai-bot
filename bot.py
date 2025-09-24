@@ -7,11 +7,10 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler  # ← Исправлено!
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
 from flask import Flask
 import threading
-import asyncio
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -23,15 +22,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка токена и URL
+# Загрузка токена
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
     logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Amvera → Переменные окружения")
-    exit(1)
-
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-if not WEBHOOK_URL:
-    logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
     exit(1)
 
 # Инициализация планировщика (асинхронный!)
@@ -67,13 +61,13 @@ def init_db():
 
 init_db()
 
-# Загрузка рецептов
+# Загрузка рецептов (опционально)
 def load_recipes():
     try:
         with open('recipes.json', 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
-        logger.warning("Файл recipes.json не найден")
+        logger.warning("Файл recipes.json не найден — игнорируется")
         return []
 
 RECIPES = load_recipes()
@@ -235,7 +229,6 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         cursor.close()
         conn.close()
 
-        # Планируем уведомление (асинхронно!)
         schedule_notification(product_id, user_id, product_name, expiration_days)
 
         success_text = (
@@ -437,7 +430,6 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
         cursor.close()
         conn.close()
 
-        # Удаляем задачи планировщика
         for job in scheduler.get_jobs():
             if job.id.startswith(f"notify_{user_id}_"):
                 try:
@@ -501,13 +493,11 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
         notify_time = datetime.now() + timedelta(days=expiration_days - 1)
         job_id = f"notify_{user_id}_{product_id}"
         
-        # Удаляем старую задачу, если есть
         try:
             scheduler.remove_job(job_id)
         except Exception:
             pass
             
-        # Добавляем асинхронную задачу
         scheduler.add_job(
             send_notification,
             'date',
@@ -652,7 +642,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
 
-        # Планировщик: ежедневная проверка просроченных
+        # Планировщик: ежедневная проверка просроченных в 9:00
         scheduler.add_job(
             check_expired_products,
             'cron',
@@ -661,20 +651,15 @@ def main():
             id='daily_expired_check'
         )
 
-        # Запускаем бота через Webhook
+        # 🔴 АМВЕРА САМА УСТАНАВЛИВАЕТ WEBHOOK — НЕ НУЖНО УКАЗЫВАТЬ webhook_url!
         PORT = int(os.environ.get('PORT', 8080))
-        webhook_path = f"/{TOKEN}"
-        full_webhook_url = WEBHOOK_URL + webhook_path
-
-        logger.info(f"🌐 Устанавливаем webhook: {full_webhook_url}")
-        application.bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
-
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
+
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=webhook_path,
-            webhook_url=full_webhook_url,
+            url_path=TOKEN,           # Путь: /<токен>
+            webhook_url=None,         # ← КЛЮЧЕВОЕ: Amvera сам знает URL!
             secret_token=TOKEN
         )
 
