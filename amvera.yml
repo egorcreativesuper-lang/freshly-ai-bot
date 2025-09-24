@@ -1,99 +1,41 @@
-name: freshly-bot
-service:
-  runtime: python
-  version: 3.11
+app:
+  name: "Freshly-Bot"
+  runtime: "python3.11"
 
-build:
-  requirementsPath: requirements.txt
+  include:
+    - "bot.py"
+    - "recipes.json"
+    - "photos/"
+    - "bot.log"
+    - "products.db"
 
-resources:
-  memory: 512Mi
-  cpu: 250m
+  build:
+    - "pip3 install --no-cache-dir -r requirements.txt"
 
-environment:
-  variables:
-    # Обязательные переменные
-    TELEGRAM_BOT_TOKEN: 8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA
-    WEBHOOK_URL: https://freshly.amvera.io
-    
-    # Дополнительные настройки
-    LOG_LEVEL: "INFO"
-    TZ: "Europe/Moscow"
-    
-    # Настройки вебхука
-    WEBHOOK_MODE: "true"
-    PORT: "8080"
+  run:
+    - "python3 bot.py"
 
-deploy:
-  instances: 1
-
-  probes:
-    liveness:
-      httpGet:
-        path: /health
-        port: 8080
-      initialDelaySeconds: 30
-      periodSeconds: 60
-      timeoutSeconds: 10
-
-    readiness:
-      httpGet:
-        path: /health
-        port: 8080
-      initialDelaySeconds: 20
-      periodSeconds: 30
-      timeoutSeconds: 5
-
-  scaling:
-    auto:
-      min: 1
-      max: 2
-      cpu: 70
-
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-
-# Сборка и запуск
-buildCommands:
-  - echo "Installing dependencies..."
-  - pip install -r requirements.txt
-
-runCommand: python bot.py
-
-# Health check endpoint (добавьте этот код в ваш bot.py)
-healthCheck:
-  path: /health
   port: 8080
 
-# Логирование
-logging:
-  enabled: true
-  level: info
+  health_check:
+    path: "/health"
+    port: 8081
 
-# Persistence для базы данных
-persistence:
-  enabled: true
-  size: 1Gi
-  mountPath: /app/data
+  env:
+    TELEGRAM_BOT_TOKEN: "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"     # ← ЗАМЕНИТЕ НА СВОЙ ТОКЕН!
+    WEBHOOK_URL: "https://amvera-freshly-run-freshly.amvera.io"  # ← КРИТИЧНО: ТОЧНО ТАК!
+    HEALTH_CHECK_PORT: "8081"
 
-# Безопасность
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 1001
+  domain: "amvera-freshly-run-freshly"  # ← ДОЛЖЕН БЫТЬ ТОЧНО ТАК ЖЕ, КАК В WEBHOOK_URL!
 
-# Дополнительные настройки
-config:
-  # Перезапуск при ошибках
-  restartPolicy: always
-  
-  # Ограничения ресурсов
+  storage:
+    size: "1GB"
+
   resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "250m"
+    cpu: "0.5"
+    memory: "512Mi"
+
+  restart_policy: "always"
+
+  logs:
+    level: "info"
