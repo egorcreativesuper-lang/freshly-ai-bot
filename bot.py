@@ -10,9 +10,7 @@ from telegram.ext import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
-from flask import Flask
-import threading
-import asyncio
+from functools import wraps
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -39,10 +37,36 @@ if not WEBHOOK_URL:
 scheduler = BackgroundScheduler()
 scheduler.start()
 
+# Вспомогательные функции для работы с БД
+def get_db_connection():
+    """Безопасное подключение к БД"""
+    try:
+        conn = sqlite3.connect('products.db')
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        raise
+
+def safe_db_operation(func):
+    """Декоратор для безопасных операций с БД"""
+    @wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        try:
+            return await func(update, context, *args, **kwargs)
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка БД в {func.__name__}: {e}")
+            await update.message.reply_text(
+                "❌ Ошибка базы данных. Попробуйте позже.", 
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+    return wrapper
+
 # Инициализация базы данных SQLite
 def init_db():
     try:
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS products (
@@ -59,7 +83,6 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON products(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_expires_at ON products(expires_at)')
         conn.commit()
-        cursor.close()
         conn.close()
         logger.info("✅ База данных SQLite инициализирована")
     except Exception as e:
@@ -81,19 +104,83 @@ RECIPES = load_recipes()
 
 # Вспомогательная функция для парсинга даты
 def parse_date(date_str: str):
-    date_formats = ['%Y-%m-%d', '%Y.%m.%d', '%d.%m.%Y', '%d-%m-%Y']
-    for fmt in date_formats:
+    """Улучшенный парсинг дат с автокоррекцией"""
+    if not date_str:
+        return None
+        
+    date_str = date_str.strip().replace('/', '.').replace('\\', '.')
+    
+    # Попробуем угадать формат по разделителям
+    if '-' in date_str:
+        formats = ['%Y-%m-%d', '%d-%m-%Y']
+    elif '.' in date_str:
+        formats = ['%Y.%m.%d', '%d.%m.%Y', '%m.%d.%Y']
+    else:
+        formats = ['%Y%m%d', '%d%m%Y']
+    
+    for fmt in formats:
         try:
             return datetime.strptime(date_str, fmt).date()
         except ValueError:
             continue
+    
+    # Попробуем российский формат как последний вариант
+    try:
+        parts = date_str.split('.')
+        if len(parts) == 3 and len(parts[2]) == 4:
+            # Предполагаем DD.MM.YYYY
+            return datetime.strptime(date_str, '%d.%m.%Y').date()
+    except:
+        pass
+    
     return None
+
+# Восстановление уведомлений при перезапуске
+def restore_scheduled_notifications():
+    """Восстановление уведомлений при перезапуске бота"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        today = datetime.now().date()
+        cursor.execute('''
+            SELECT id, user_id, name, expires_at 
+            FROM products 
+            WHERE expires_at > ? AND notified = FALSE
+        ''', (today.isoformat(),))
+        
+        products = cursor.fetchall()
+        
+        for product in products:
+            product_id, user_id, name, expires_at = product
+            expires_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
+            days_left = (expires_date - today).days
+            
+            if days_left > 0:
+                schedule_notification(product_id, user_id, name, days_left)
+        
+        conn.close()
+        logger.info(f"✅ Восстановлено {len(products)} уведомлений")
+    except Exception as e:
+        logger.error(f"❌ Ошибка восстановления уведомлений: {e}")
+
+restore_scheduled_notifications()
 
 # Вспомогательные функции
 async def recognize_product(photo_path: str) -> str:
-    """Заглушка для распознавания продукта"""
-    products = ["Молоко", "Хлеб", "Яйца", "Сыр", "Йогурт", "Мясо", "Рыба", "Овощи", "Фрукты"]
-    return random.choice(products)
+    """Улучшенная заглушка для распознавания продуктов"""
+    common_products = {
+        "молочные": ["Молоко", "Йогурт", "Сметана", "Творог", "Сыр", "Кефир", "Сливки", "Масло"],
+        "хлебные": ["Хлеб", "Булочки", "Батон", "Лаваш", "Багет", "Сухари"],
+        "мясные": ["Курица", "Говядина", "Свинина", "Фарш", "Колбаса", "Сосиски", "Бекон"],
+        "рыбные": ["Рыба", "Филе рыбы", "Креветки", "Кальмары", "Мидии", "Икра"],
+        "овощи": ["Помидоры", "Огурцы", "Картофель", "Морковь", "Лук", "Капуста", "Перец"],
+        "фрукты": ["Яблоки", "Бананы", "Апельсины", "Лимоны", "Груши", "Виноград", "Ягоды"],
+        "бакалея": ["Крупа", "Макароны", "Мука", "Сахар", "Соль", "Масло растительное"]
+    }
+    
+    category = random.choice(list(common_products.keys()))
+    return random.choice(common_products[category])
 
 def get_main_menu_keyboard():
     keyboard = [
@@ -104,28 +191,33 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
-    keyboard = [["❌ Отмена", "🏠 Главное меню"]]
+    keyboard = [["❌ Отмена"]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
 # --- Диалог добавления продукта ВРУЧНУЮ ---
+@safe_db_operation
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "✏️ *Шаг 1/3: Название продукта*\n\n"
         "Введите название продукта (например, 'Молоко', 'Сыр Моцарелла'):\n\n"
-        "_Или нажмите '❌ Отмена' / '🏠 Главное меню'_",
+        "_Или нажмите '❌ Отмена'_",
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_PRODUCT_NAME
 
+@safe_db_operation
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text.strip()
-    if user_input in ["❌ Отмена", "🏠 Главное меню"]:
+    if user_input == "❌ Отмена":
         await cancel(update, context)
         return ConversationHandler.END
 
-    if not user_input:
-        await update.message.reply_text("Пожалуйста, введите корректное название продукта.")
+    if not user_input or len(user_input) > 100:
+        await update.message.reply_text(
+            "❌ Пожалуйста, введите корректное название продукта (не более 100 символов).",
+            reply_markup=get_cancel_keyboard()
+        )
         return CHOOSING_PRODUCT_NAME
 
     context.user_data['product_name'] = user_input
@@ -135,26 +227,38 @@ async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE
         "• ГГГГ-ММ-ДД (2025-09-23)\n"
         "• ГГГГ.ММ.ДД (2025.09.23)\n"
         "• ДД.ММ.ГГГГ (23.09.2025)\n\n"
-        "_Или нажмите '❌ Отмена' / '🏠 Главное меню'_",
+        "_Или нажмите '❌ Отмена'_",
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_PURCHASE_DATE
 
+@safe_db_operation
 async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text.strip()
-    if user_input in ["❌ Отмена", "🏠 Главное меню"]:
+    if user_input == "❌ Отмена":
         await cancel(update, context)
         return ConversationHandler.END
 
     parsed_date = parse_date(user_input)
+    today = datetime.now().date()
+    
     if parsed_date is None:
         await update.message.reply_text(
-            "😔 *Неверный формат даты.*\n"
+            "❌ *Неверный формат даты.*\n\n"
             "Пожалуйста, введите дату в одном из форматов:\n"
             "• ГГГГ-ММ-ДД (2025-09-23)\n"
             "• ГГГГ.ММ.ДД (2025.09.23)\n"
             "• ДД.ММ.ГГГГ (23.09.2025)",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return CHOOSING_PURCHASE_DATE
+
+    if parsed_date > today:
+        await update.message.reply_text(
+            "❌ *Ошибка:* Дата покупки не может быть в будущем.\n"
+            "Пожалуйста, введите корректную дату.",
             parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
@@ -167,22 +271,25 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
         "• ГГГГ-ММ-ДД (2025-10-07)\n"
         "• ГГГГ.ММ.ДД (2025.10.07)\n"
         "• ДД.ММ.ГГГГ (07.10.2025)\n\n"
-        "_Или нажмите '❌ Отмена' / '🏠 Главное меню'_",
+        "_Или нажмите '❌ Отмена'_",
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_EXPIRATION_DATE
 
+@safe_db_operation
 async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text.strip()
-    if user_input in ["❌ Отмена", "🏠 Главное меню"]:
+    if user_input == "❌ Отмена":
         await cancel(update, context)
         return ConversationHandler.END
 
     parsed_date = parse_date(user_input)
+    today = datetime.now().date()
+    
     if parsed_date is None:
         await update.message.reply_text(
-            "😔 *Неверный формат даты.*\n"
+            "❌ *Неверный формат даты.*\n\n"
             "Пожалуйста, введите дату в одном из форматов:\n"
             "• ГГГГ-ММ-ДД (2025-10-07)\n"
             "• ГГГГ.ММ.ДД (2025.10.07)\n"
@@ -192,30 +299,27 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         )
         return CHOOSING_EXPIRATION_DATE
 
-    today = datetime.now().date()
-    if parsed_date < today:
+    if parsed_date <= today:
         await update.message.reply_text(
-            "❌ *Ошибка:* Дата истечения не может быть в прошлом.\n"
+            "❌ *Ошибка:* Дата истечения должна быть в будущем.\n"
             "Пожалуйста, введите корректную дату.",
             parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
         return CHOOSING_EXPIRATION_DATE
 
-    context.user_data['expires_at'] = parsed_date.isoformat()
-
     purchase_date = datetime.strptime(context.user_data['purchase_date'], '%Y-%m-%d').date()
-    expiration_days = (parsed_date - purchase_date).days
-
-    if expiration_days < 0:
+    if parsed_date <= purchase_date:
         await update.message.reply_text(
-            "❌ *Ошибка:* Дата истечения не может быть раньше даты покупки.\n"
+            "❌ *Ошибка:* Дата истечения не может быть раньше или равна дате покупки.\n"
             "Пожалуйста, начните заново.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
         return ConversationHandler.END
 
+    context.user_data['expires_at'] = parsed_date.isoformat()
+    expiration_days = (parsed_date - purchase_date).days
     context.user_data['expiration_days'] = expiration_days
 
     # Сохраняем в SQLite
@@ -225,7 +329,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
     expires_at_str = context.user_data['expires_at']
 
     try:
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO products (user_id, name, purchase_date, expiration_days, added_at, expires_at)
@@ -233,7 +337,6 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         ''', (user_id, product_name, purchase_date_str, expiration_days, datetime.now().isoformat(), expires_at_str))
         product_id = cursor.lastrowid
         conn.commit()
-        cursor.close()
         conn.close()
 
         # Планируем уведомление
@@ -255,22 +358,27 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     except Exception as e:
-        logger.error(f"Ошибка сохранения продукта: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при сохранении продукта.", reply_markup=get_main_menu_keyboard())
+        logger.error(f"❌ Ошибка сохранения продукта: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при сохранении продукта.", 
+            reply_markup=get_main_menu_keyboard()
+        )
 
     return ConversationHandler.END
 
 # --- Диалог добавления продукта ПО ФОТО ---
+@safe_db_operation
 async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "📸 *Добавление по фото*\n\n"
         "Отправьте фото продукта, и я попробую его распознать!\n\n"
-        "_Или нажмите '❌ Отмена' / '🏠 Главное меню'_",
+        "_Или нажмите '❌ Отмена'_",
         parse_mode='Markdown',
         reply_markup=get_cancel_keyboard()
     )
     return PHOTO_RECOGNITION
 
+@safe_db_operation
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.message.from_user.id
@@ -282,13 +390,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         photo_path = f"photos/photo_{user_id}_{photo_hash}.jpg"
         await photo_file.download_to_drive(photo_path)
 
+        # Показываем что фото получено
+        await update.message.reply_text("🔍 *Распознаю продукт...*", parse_mode='Markdown')
+        
         product_name = await recognize_product(photo_path)
         
+        # Очищаем временные файлы
         if os.path.exists(photo_path):
             os.remove(photo_path)
 
         if not product_name:
-            await update.message.reply_text("❌ Не удалось распознать продукт. Попробуйте снова!", reply_markup=get_main_menu_keyboard())
+            await update.message.reply_text(
+                "❌ Не удалось распознать продукт. Попробуйте снова!", 
+                reply_markup=get_main_menu_keyboard()
+            )
             return ConversationHandler.END
 
         context.user_data['product_name'] = product_name
@@ -306,14 +421,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return CHOOSING_PURCHASE_DATE
 
     except Exception as e:
-        logger.error(f"Ошибка обработки фото: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при обработке фото", reply_markup=get_main_menu_keyboard())
+        logger.error(f"❌ Ошибка обработки фото: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке фото", 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
+@safe_db_operation
 async def handle_text_in_photo_recognition(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text.strip()
     
-    if user_input in ["❌ Отмена", "🏠 Главное меню"]:
+    if user_input == "❌ Отмена":
         await cancel(update, context)
         return ConversationHandler.END
         
@@ -325,7 +444,25 @@ async def handle_text_in_photo_recognition(update: Update, context: ContextTypes
     return PHOTO_RECOGNITION
 
 # --- Основные команды ---
+@safe_db_operation
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Очищаем данные предыдущих сессий
+    context.user_data.clear()
+    
+    # Приветствие с персональной статистикой
+    user_id = update.message.from_user.id
+    product_count = 0
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = ?', (user_id,))
+        product_count = cursor.fetchone()[0]
+        conn.close()
+    except:
+        pass
+    
+    stats_text = f"\n📊 У вас отслеживается {product_count} продуктов" if product_count > 0 else "\n📊 У вас пока нет добавленных продуктов"
+    
     welcome_text = (
         "🌟 *Добро пожаловать в Freshly Bot!*\n\n"
         "Я — ваш личный помощник в борьбе с пищевыми отходами 🍎🥦\n\n"
@@ -334,8 +471,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📅 *Отслеживать сроки годности*\n"
         "🔔 *Напоминать* о скором истечении срока\n"
         "👩‍🍳 *Предлагать рецепты* для использования продуктов\n\n"
+        f"{stats_text}\n\n"
         "Выберите действие ниже и начните спасать еду и деньги! 💰"
     )
+    
     await update.message.reply_text(
         welcome_text,
         parse_mode='Markdown',
@@ -343,13 +482,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+@safe_db_operation
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await start(update, context)
 
+@safe_db_operation
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.message.from_user.id
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT id, name, purchase_date, expiration_days, expires_at, notified 
@@ -370,7 +511,8 @@ async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TY
         text = "📋 *Ваши продукты:*\n\n"
         today = datetime.now().date()
         
-        for i, (prod_id, name, purchase_date, exp_days, expires_at, notified) in enumerate(products, 1):
+        for i, product in enumerate(products, 1):
+            prod_id, name, purchase_date, exp_days, expires_at, notified = product
             expires_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
             days_left = (expires_date - today).days
             
@@ -392,14 +534,18 @@ async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     except Exception as e:
-        logger.error(f"Ошибка в list_products_handler: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при загрузке списка продуктов.", reply_markup=get_main_menu_keyboard())
+        logger.error(f"❌ Ошибка в list_products_handler: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при загрузке списка продуктов.", 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
+@safe_db_operation
 async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.message.from_user.id
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         today = datetime.now().strftime('%Y-%m-%d')
@@ -413,10 +559,11 @@ async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         conn.close()
 
         if not expired_products:
-            text = "✅ *Просроченных продуктов нет!*"
+            text = "✅ *Просроченных продуктов нет!* Отличная работа! 🎉"
         else:
             text = "🚨 *Просроченные продукты:*\n\n"
-            for name, expires_at in expired_products:
+            for product in expired_products:
+                name, expires_at = product
                 text += f"• *{name}* - истек {expires_at}\n"
             text += "\n❌ Рекомендуем выбросить эти продукты!"
 
@@ -424,20 +571,24 @@ async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     except Exception as e:
-        logger.error(f"Ошибка в show_expired_handler: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при загрузке просроченных продуктов.", reply_markup=get_main_menu_keyboard())
+        logger.error(f"❌ Ошибка в show_expired_handler: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при загрузке просроченных продуктов.", 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
+@safe_db_operation
 async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         user_id = update.message.from_user.id
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
         conn.commit()
-        cursor.close()
         conn.close()
 
+        # Удаляем запланированные уведомления
         for job in scheduler.get_jobs():
             if job.id.startswith(f"notify_{user_id}_"):
                 try:
@@ -445,14 +596,22 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
                 except JobLookupError:
                     pass
 
-        await update.message.reply_text("🗑️ *Все продукты удалены!*", parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(
+            "🗑️ *Все продукты удалены!*", 
+            parse_mode='Markdown', 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
     except Exception as e:
-        logger.error(f"Ошибка в clear_products_handler: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при удалении продуктов.", reply_markup=get_main_menu_keyboard())
+        logger.error(f"❌ Ошибка в clear_products_handler: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при удалении продуктов.", 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
+@safe_db_operation
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     help_text = (
         "ℹ️ *Как пользоваться ботом:*\n\n"
@@ -474,6 +633,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     )
     return ConversationHandler.END
 
+@safe_db_operation
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         '✅ Операция отменена.',
@@ -485,7 +645,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # --- Планировщик ---
 def schedule_notification(product_id: int, user_id: int, product_name: str, expiration_days: int):
     try:
-        notify_time = datetime.now() + timedelta(days=expiration_days - 1)
+        if expiration_days <= 1:
+            # Если срок меньше 2 дней, уведомляем сегодня
+            notify_time = datetime.now() + timedelta(hours=1)
+        else:
+            notify_time = datetime.now() + timedelta(days=expiration_days - 1)
+        
         job_id = f"notify_{user_id}_{product_id}"
         
         try:
@@ -500,9 +665,9 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
             args=[user_id, product_name, product_id],
             id=job_id
         )
-        logger.info(f"Запланировано уведомление для продукта {product_id} пользователя {user_id}")
+        logger.info(f"✅ Запланировано уведомление для продукта {product_id} пользователя {user_id}")
     except Exception as e:
-        logger.error(f"Ошибка планирования уведомления: {e}")
+        logger.error(f"❌ Ошибка планирования уведомления: {e}")
 
 async def send_notification(user_id: int, product_name: str, product_id: int):
     try:
@@ -511,19 +676,27 @@ async def send_notification(user_id: int, product_name: str, product_id: int):
         
         await bot.send_message(
             chat_id=user_id,
-            text=f"⚠️ *{product_name}* испортится завтра!\nПопробуй приготовить что-нибудь? 👨‍🍳",
+            text=f"⚠️ *{product_name}* испортится завтра!\n\nПопробуй приготовить что-нибудь вкусное! 👨‍🍳",
             parse_mode='Markdown'
         )
-        logger.info(f"Уведомление отправлено пользователю {user_id} для продукта {product_name}")
+        
+        # Помечаем как уведомленное в БД
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE products SET notified = TRUE WHERE id = ?', (product_id,))
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"✅ Уведомление отправлено пользователю {user_id} для продукта {product_name}")
     except Exception as e:
-        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+        logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 async def check_expired_products():
     try:
         from telegram import Bot
         bot = Bot(token=TOKEN)
         
-        conn = sqlite3.connect('products.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         today = datetime.now().strftime('%Y-%m-%d')
@@ -534,7 +707,8 @@ async def check_expired_products():
         
         expired_users = cursor.fetchall()
         
-        for (user_id,) in expired_users:
+        for user_tuple in expired_users:
+            user_id = user_tuple[0]
             try:
                 cursor.execute('''
                     SELECT name, expires_at FROM products 
@@ -554,21 +728,22 @@ async def check_expired_products():
                     try:
                         await bot.send_message(
                             chat_id=user_id,
-                            text=f"🚨 *Просроченные продукты:*\n{product_list}\n\nРекомендуем выбросить!",
+                            text=f"🚨 *Просроченные продукты:*\n{product_list}\n\n❌ Рекомендуем выбросить!",
                             parse_mode='Markdown'
                         )
                     except Exception as e:
-                        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+                        logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
                     
             except Exception as e:
-                logger.error(f"Ошибка обработки пользователя {user_id}: {e}")
+                logger.error(f"❌ Ошибка обработки пользователя {user_id}: {e}")
         
         conn.close()
         
     except Exception as e:
-        logger.error(f"Ошибка в check_expired_products: {e}")
+        logger.error(f"❌ Ошибка в check_expired_products: {e}")
 
 # --- Обработчик меню ---
+@safe_db_operation
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text
 
@@ -590,19 +765,11 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif text == "ℹ️ Помощь":
         return await help_handler(update, context)
     else:
-        await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text(
+            "Пожалуйста, используйте кнопки меню.", 
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
-
-# --- Flask Health Check Server ---
-app = Flask(__name__)
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
 
 # --- Основная функция ---
 async def set_webhook(application):
@@ -613,10 +780,6 @@ async def set_webhook(application):
 
 def main():
     try:
-        # Запускаем Flask в фоновом потоке
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-
         application = Application.builder().token(TOKEN).build()
 
         # Обработчики
@@ -628,8 +791,9 @@ def main():
                 CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
             },
             fallbacks=[
-                MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
-                CommandHandler("start", show_main_menu)
+                MessageHandler(filters.Regex("^(❌ Отмена)$"), cancel),
+                CommandHandler("start", show_main_menu),
+                CommandHandler("cancel", cancel)
             ],
             allow_reentry=True
         )
@@ -645,8 +809,9 @@ def main():
                 CHOOSING_EXPIRATION_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_expiration_date)],
             },
             fallbacks=[
-                MessageHandler(filters.Regex("^(❌ Отмена|🏠 Главное меню)$"), cancel),
-                CommandHandler("start", show_main_menu)
+                MessageHandler(filters.Regex("^(❌ Отмена)$"), cancel),
+                CommandHandler("start", show_main_menu),
+                CommandHandler("cancel", cancel)
             ],
             allow_reentry=True
         )
@@ -655,8 +820,10 @@ def main():
         application.add_handler(photo_conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(CommandHandler("help", help_handler))
 
-        # Планировщик
+        # Планировщик ежедневной проверки
         scheduler.add_job(
             check_expired_products,
             'cron',
@@ -671,6 +838,7 @@ def main():
         # Запускаем Telegram бота через вебхук
         PORT = int(os.environ.get('PORT', 8080))
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
+        
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -680,9 +848,10 @@ def main():
         )
 
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
     finally:
         scheduler.shutdown()
 
 if __name__ == '__main__':
+    import asyncio
     main()
