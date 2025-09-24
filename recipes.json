@@ -1,1 +1,37 @@
-{}
+[
+  {
+    "name": "Омлет с сыром",
+    "ingredients": ["яйца", "сыр"],
+    "link": "https://www.google.com/search?q=омлет+с+сыром"
+  },
+  {
+    "name": "Салат из овощей",
+    "ingredients": ["овощи", "фрукты"],
+    "link": "https://www.google.com/search?q=салат+из+овощей"
+  },
+  {
+    "name": "Творожная запеканка",
+    "ingredients": ["творог", "яйца", "сахар"],
+    "link": "https://www.google.com/search?q=творожная+запеканка"
+  },
+  {
+    "name": "Сырники",
+    "ingredients": ["творог", "мука", "яйца"],
+    "link": "https://www.google.com/search?q=сырники+рецепт"
+  },
+  {
+    "name": "Молочная каша",
+    "ingredients": ["молоко", "гречка", "рис"],
+    "link": "https://www.google.com/search?q=молочная+каша+рецепт"
+  },
+  {
+    "name": "Бутерброд с колбасой",
+    "ingredients": ["хлеб", "колбаса", "сыр"],
+    "link": "https://www.google.com/search?q=бутерброд+с+колбасой"
+  },
+  {
+    "name": "Йогуртовый соус",
+    "ingredients": ["йогурт", "чеснок", "зелень"],
+    "link": "https://www.google.com/search?q=йогуртовый+соус"
+  }
+]
