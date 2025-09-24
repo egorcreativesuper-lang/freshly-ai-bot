@@ -7,8 +7,7 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.jobstores.base import JobLookupError
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # ← Исправлено!
 import json
 from flask import Flask
 import threading
@@ -35,8 +34,8 @@ if not WEBHOOK_URL:
     logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
     exit(1)
 
-# Инициализация планировщика
-scheduler = BackgroundScheduler()
+# Инициализация планировщика (асинхронный!)
+scheduler = AsyncIOScheduler()
 scheduler.start()
 
 # Инициализация базы данных SQLite
@@ -152,9 +151,9 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "😔 *Неверный формат даты.*\n"
             "Пожалуйста, введите дату в одном из форматов:\n"
-            "• ГГГГ-ММ-ДД (2025-09-23)\n"
-            "• ГГГГ.ММ.ДД (2025.09.23)\n"
-            "• ДД.ММ.ГГГГ (23.09.2025)",
+            "• ГГГГ-ММ-ДД (2025-10-07)\n"
+            "• ГГГГ.ММ.ДД (2025.10.07)\n"
+            "• ДД.ММ.ГГГГ (07.10.2025)",
             parse_mode='Markdown',
             reply_markup=get_cancel_keyboard()
         )
@@ -236,7 +235,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         cursor.close()
         conn.close()
 
-        # Планируем уведомление
+        # Планируем уведомление (асинхронно!)
         schedule_notification(product_id, user_id, product_name, expiration_days)
 
         success_text = (
@@ -438,11 +437,12 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
         cursor.close()
         conn.close()
 
+        # Удаляем задачи планировщика
         for job in scheduler.get_jobs():
             if job.id.startswith(f"notify_{user_id}_"):
                 try:
                     scheduler.remove_job(job.id)
-                except JobLookupError:
+                except Exception:
                     pass
 
         await update.message.reply_text("🗑️ *Все продукты удалены!*", parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
@@ -482,17 +482,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- Планировщик ---
+# --- Планировщик (асинхронный!) ---
+async def send_notification(user_id: int, product_name: str, product_id: int):
+    try:
+        from telegram import Bot
+        bot = Bot(token=TOKEN)
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"⚠️ *{product_name}* испортится завтра!\nПопробуй приготовить что-нибудь? 👨‍🍳",
+            parse_mode='Markdown'
+        )
+        logger.info(f"Уведомление отправлено пользователю {user_id} для продукта {product_name}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+
 def schedule_notification(product_id: int, user_id: int, product_name: str, expiration_days: int):
     try:
         notify_time = datetime.now() + timedelta(days=expiration_days - 1)
         job_id = f"notify_{user_id}_{product_id}"
         
+        # Удаляем старую задачу, если есть
         try:
             scheduler.remove_job(job_id)
-        except JobLookupError:
+        except Exception:
             pass
             
+        # Добавляем асинхронную задачу
         scheduler.add_job(
             send_notification,
             'date',
@@ -503,20 +518,6 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
         logger.info(f"Запланировано уведомление для продукта {product_id} пользователя {user_id}")
     except Exception as e:
         logger.error(f"Ошибка планирования уведомления: {e}")
-
-async def send_notification(user_id: int, product_name: str, product_id: int):
-    try:
-        from telegram import Bot
-        bot = Bot(token=TOKEN)
-        
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"⚠️ *{product_name}* испортится завтра!\nПопробуй приготовить что-нибудь? 👨‍🍳",
-            parse_mode='Markdown'
-        )
-        logger.info(f"Уведомление отправлено пользователю {user_id} для продукта {product_name}")
-    except Exception as e:
-        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 async def check_expired_products():
     try:
@@ -605,18 +606,13 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # --- Основная функция ---
-async def set_webhook(application):
-    webhook_path = f"/{TOKEN}"
-    full_webhook_url = WEBHOOK_URL + webhook_path
-    await application.bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
-    logger.info(f"🌐 Webhook установлен: {full_webhook_url}")
-
 def main():
     try:
         # Запускаем Flask в фоновом потоке
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
 
+        # Создаём приложение Telegram
         application = Application.builder().token(TOKEN).build()
 
         # Обработчики
@@ -656,7 +652,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
 
-        # Планировщик
+        # Планировщик: ежедневная проверка просроченных
         scheduler.add_job(
             check_expired_products,
             'cron',
@@ -665,17 +661,20 @@ def main():
             id='daily_expired_check'
         )
 
-        # Устанавливаем вебхук
-        asyncio.run(set_webhook(application))
-
-        # Запускаем Telegram бота через вебхук
+        # Запускаем бота через Webhook
         PORT = int(os.environ.get('PORT', 8080))
+        webhook_path = f"/{TOKEN}"
+        full_webhook_url = WEBHOOK_URL + webhook_path
+
+        logger.info(f"🌐 Устанавливаем webhook: {full_webhook_url}")
+        application.bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
+
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=TOKEN,
-            webhook_url=WEBHOOK_URL + f"/{TOKEN}",
+            url_path=webhook_path,
+            webhook_url=full_webhook_url,
             secret_token=TOKEN
         )
 
