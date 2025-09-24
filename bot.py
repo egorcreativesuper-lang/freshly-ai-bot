@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.base import JobLookupError  # ← ИСПРАВЛЕНО: Импорт для JobLookupError
+from apscheduler.jobstores.base import JobLookupError
 import json
 from functools import wraps, partial
 import threading
@@ -41,6 +41,8 @@ if not WEBHOOK_URL:
     logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
     exit(1)
 
+logger.info(f"🔍 WEBHOOK_URL из окружения: '{WEBHOOK_URL}'")
+
 # Инициализация планировщика
 scheduler = AsyncIOScheduler()
 scheduler.start()
@@ -50,16 +52,13 @@ app = Flask(__name__)
 
 @app.route('/health')
 def health_check():
-    """Эндпоинт для проверки здоровья приложения"""
     return {'status': 'ok', 'message': 'Freshly Bot is running'}, 200
 
 def run_health_check():
-    """Запуск health check сервера в отдельном потоке"""
     port = int(os.environ.get("HEALTH_CHECK_PORT", 8081))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def start_health_check():
-    """Запуск health check в фоновом режиме"""
     try:
         health_thread = threading.Thread(target=run_health_check, daemon=True)
         health_thread.start()
@@ -69,7 +68,6 @@ def start_health_check():
 
 # Вспомогательные функции для работы с БД
 def get_db_connection():
-    """Безопасное подключение к БД"""
     try:
         conn = sqlite3.connect('products.db')
         conn.row_factory = sqlite3.Row
@@ -79,7 +77,6 @@ def get_db_connection():
         raise
 
 def safe_db_operation(func):
-    """Декоратор для безопасных операций с БД"""
     @wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         try:
@@ -128,19 +125,20 @@ def load_recipes():
             return json.load(f)
     except FileNotFoundError:
         logger.warning("Файл recipes.json не найден")
-        return []
+        return {}
+    except json.JSONDecodeError:
+        logger.warning("Файл recipes.json повреждён или не является валидным JSON. Используется пустой словарь.")
+        return {}
 
 RECIPES = load_recipes()
 
 # Вспомогательная функция для парсинга даты
 def parse_date(date_str: str):
-    """Улучшенный парсинг дат с автокоррекцией"""
     if not date_str:
         return None
         
     date_str = date_str.strip().replace('/', '.').replace('\\', '.')
     
-    # Попробуем угадать формат по разделителям
     if '-' in date_str:
         formats = ['%Y-%m-%d', '%d-%m-%Y']
     elif '.' in date_str:
@@ -154,11 +152,9 @@ def parse_date(date_str: str):
         except ValueError:
             continue
     
-    # Попробуем российский формат как последний вариант
     try:
         parts = date_str.split('.')
         if len(parts) == 3 and len(parts[2]) == 4:
-            # Предполагаем DD.MM.YYYY
             return datetime.strptime(date_str, '%d.%m.%Y').date()
     except:
         pass
@@ -167,7 +163,6 @@ def parse_date(date_str: str):
 
 # Восстановление уведомлений при перезапуске
 def restore_scheduled_notifications(bot):
-    """Восстановление уведомлений при перезапуске бота"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -196,7 +191,6 @@ def restore_scheduled_notifications(bot):
                 except JobLookupError:
                     pass
                 
-                # Планируем уведомление асинхронно
                 asyncio.create_task(schedule_notification_async(product_id, user_id, name, days_left, bot))
                 restored_count += 1
         
@@ -207,7 +201,6 @@ def restore_scheduled_notifications(bot):
 
 # Вспомогательные функции
 async def recognize_product(photo_path: str) -> str:
-    """Улучшенная заглушка для распознавания продуктов"""
     common_products = {
         "молочные": ["Молоко", "Йогурт", "Сметана", "Творог", "Сыр", "Кефир", "Сливки", "Масло", "Ряженка"],
         "хлебные": ["Хлеб", "Булочки", "Батон", "Лаваш", "Багет", "Сухари", "Пирожки"],
@@ -361,7 +354,6 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
     expiration_days = (parsed_date - purchase_date).days
     context.user_data['expiration_days'] = expiration_days
 
-    # Сохраняем в SQLite
     user_id = update.message.from_user.id
     product_name = context.user_data['product_name']
     purchase_date_str = context.user_data['purchase_date']
@@ -378,8 +370,7 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         conn.commit()
         conn.close()
 
-        # Планируем уведомление асинхронно
-        await schedule_notification_async(product_id, user_id, product_name, expiration_days, bot)  # ← bot передаётся из main()
+        await schedule_notification_async(product_id, user_id, product_name, expiration_days, bot)
 
         success_text = (
             f"🎉 *Ура! Продукт добавлен!*\n\n"
@@ -428,13 +419,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         photo_hash = file_id[-10:]
         photo_path = f"photos/photo_{user_id}_{photo_hash}.jpg"
         
-        # Скачиваем фото
         await photo_file.download_to_drive(photo_path)
         await update.message.reply_text("🔍 *Распознаю продукт...*", parse_mode='Markdown')
         
         product_name = await recognize_product(photo_path)
         
-        # Удаляем фото — даже если распознавание упало
         if os.path.exists(photo_path):
             os.remove(photo_path)
 
@@ -461,7 +450,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     except Exception as e:
         logger.error(f"❌ Ошибка обработки фото: {e}")
-        # Удаляем фото при ошибке
         if 'photo_path' in locals() and os.path.exists(photo_path):
             os.remove(photo_path)
         await update.message.reply_text(
@@ -488,10 +476,8 @@ async def handle_text_in_photo_recognition(update: Update, context: ContextTypes
 # --- Основные команды ---
 @safe_db_operation
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Очищаем данные предыдущих сессий
     context.user_data.clear()
     
-    # Приветствие с персональной статистикой
     user_id = update.message.from_user.id
     product_count = 0
     try:
@@ -630,13 +616,12 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
         conn.commit()
         conn.close()
 
-        # Удаляем запланированные уведомления
         for job in scheduler.get_jobs():
             if job.id.startswith(f"notify_{user_id}_"):
                 try:
                     scheduler.remove_job(job.id)
                 except JobLookupError:
-                    pass  # Уже удалено — нормально
+                    pass
 
         await update.message.reply_text(
             "🗑️ *Все продукты удалены!*", 
@@ -686,7 +671,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # --- Асинхронные функции уведомлений ---
 async def send_notification(bot, user_id: int, product_name: str, product_id: int):
-    """Отправляет уведомление через Telegram Bot API"""
     try:
         await bot.send_message(
             chat_id=user_id,
@@ -694,7 +678,6 @@ async def send_notification(bot, user_id: int, product_name: str, product_id: in
             parse_mode='Markdown'
         )
         
-        # Помечаем как уведомленное в БД
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('UPDATE products SET notified = TRUE WHERE id = ?', (product_id,))
@@ -706,7 +689,6 @@ async def send_notification(bot, user_id: int, product_name: str, product_id: in
         logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
 
 async def schedule_notification_async(product_id: int, user_id: int, product_name: str, expiration_days: int, bot):
-    """Асинхронная функция для планирования уведомления через AsyncIOScheduler"""
     try:
         if expiration_days <= 1:
             notify_time = datetime.now() + timedelta(hours=1)
@@ -715,7 +697,6 @@ async def schedule_notification_async(product_id: int, user_id: int, product_nam
         
         job_id = f"notify_{user_id}_{product_id}"
         
-        # Проверяем, не запланирована ли уже задача
         try:
             scheduler.get_job(job_id)
             logger.info(f"⏭️ Уведомление для продукта {product_id} уже запланировано — пропускаем")
@@ -723,11 +704,9 @@ async def schedule_notification_async(product_id: int, user_id: int, product_nam
         except JobLookupError:
             pass
         
-        # Создаём обёртку, чтобы передать bot в send_notification
         async def wrapped_send():
             await send_notification(bot, user_id, product_name, product_id)
         
-        # Планируем задачу
         scheduler.add_job(
             wrapped_send,
             'date',
@@ -739,7 +718,6 @@ async def schedule_notification_async(product_id: int, user_id: int, product_nam
         logger.error(f"❌ Ошибка планирования уведомления: {e}")
 
 async def check_expired_products(bot):
-    """Ежедневная проверка просроченных продуктов"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -819,17 +797,13 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- Основная функция ---
 async def main():
     try:
-        # Запускаем health check сервер
         start_health_check()
         
-        # Инициализируем бота
         application = Application.builder().token(TOKEN).build()
-        bot = application.bot  # ← Глобальный бот для асинхронных задач
+        bot = application.bot
 
-        # ТОЛЬКО ПОСЛЕ инициализации bot — восстанавливаем уведомления
         restore_scheduled_notifications(bot)
 
-        # Обработчики
         manual_conv_handler = ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^✍️ Добавить вручную$"), start_add_manually)],
             states={
@@ -870,7 +844,6 @@ async def main():
         application.add_handler(CommandHandler("cancel", cancel))
         application.add_handler(CommandHandler("help", help_handler))
 
-        # Планировщик ежедневной проверки
         scheduler.add_job(
             partial(check_expired_products, bot=bot),
             'cron',
@@ -879,7 +852,6 @@ async def main():
             id='daily_expired_check'
         )
 
-        # Устанавливаем вебхук
         PORT = int(os.environ.get('PORT', 8080))
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
         
@@ -897,5 +869,4 @@ async def main():
         scheduler.shutdown()
 
 if __name__ == '__main__':
-    # Запускаем асинхронный цикл
     asyncio.run(main())
