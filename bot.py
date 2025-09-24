@@ -3,7 +3,7 @@ import sqlite3
 import os
 import random
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
@@ -11,6 +11,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
 from flask import Flask
 import threading
+import asyncio
+from aiohttp import web
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -595,8 +597,20 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+# --- Асинхронный веб-сервер для Telegram Webhook (aiohttp) ---
+async def telegram_webhook_handler(request):
+    """Обработчик вебхука от Telegram"""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, request.app['bot'])
+        await request.app['application'].process_update(update)
+        return web.Response()
+    except Exception as e:
+        logger.error(f"Ошибка обработки вебхука: {e}")
+        return web.Response(status=500)
+
 # --- Основная функция ---
-def main():
+async def main():
     try:
         # Запускаем Flask в фоновом потоке
         flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -651,17 +665,32 @@ def main():
             id='daily_expired_check'
         )
 
-        # 🔴 АМВЕРА САМА УСТАНАВЛИВАЕТ WEBHOOK — НЕ НУЖНО УКАЗЫВАТЬ webhook_url!
-        PORT = int(os.environ.get('PORT', 8080))
-        logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
+        # Устанавливаем вебхук через Telegram Bot API (обязательно!)
+        webhook_path = f"/{TOKEN}"
+        full_webhook_url = os.getenv('WEBHOOK_URL', 'https://your-app.amvera.app') + webhook_path
+        logger.info(f"🌐 Устанавливаем вебхук: {full_webhook_url}")
 
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,           # Путь: /<токен>
-            webhook_url=None,         # ← КЛЮЧЕВОЕ: Amvera сам знает URL!
-            secret_token=TOKEN
-        )
+        bot = application.bot
+        await bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
+
+        # Создаём aiohttp сервер
+        app_server = web.Application()
+        app_server['bot'] = bot
+        app_server['application'] = application
+        app_server.router.add_post(webhook_path, telegram_webhook_handler)
+
+        # Запускаем сервер
+        PORT = int(os.environ.get('PORT', 8080))
+        runner = web.AppRunner(app_server)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+        await site.start()
+
+        logger.info(f"🚀 Telegram бот запущен на порту {PORT} через aiohttp!")
+
+        # Блокируем выполнение, чтобы сервер не завершился
+        while True:
+            await asyncio.sleep(3600)  # ждём часами
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
@@ -669,4 +698,10 @@ def main():
         scheduler.shutdown()
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            logger.warning("Event loop уже был закрыт — возможно, Amvera перезапустил среду.")
+        else:
+            raise
