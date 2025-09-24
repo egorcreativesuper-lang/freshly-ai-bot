@@ -11,6 +11,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
 from functools import wraps
+import threading
+from flask import Flask
+import asyncio
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -36,6 +39,28 @@ if not WEBHOOK_URL:
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+# Health Check Server
+app = Flask(__name__)
+
+@app.route('/health')
+def health_check():
+    """Эндпоинт для проверки здоровья приложения"""
+    return {'status': 'ok', 'message': 'Freshly Bot is running'}, 200
+
+def run_health_check():
+    """Запуск health check сервера в отдельном потоке"""
+    port = int(os.environ.get("HEALTH_CHECK_PORT", 8081))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+def start_health_check():
+    """Запуск health check в фоновом режиме"""
+    try:
+        health_thread = threading.Thread(target=run_health_check, daemon=True)
+        health_thread.start()
+        logger.info("✅ Health check server started")
+    except Exception as e:
+        logger.error(f"❌ Health check server error: {e}")
 
 # Вспомогательные функции для работы с БД
 def get_db_connection():
@@ -151,6 +176,7 @@ def restore_scheduled_notifications():
         
         products = cursor.fetchall()
         
+        restored_count = 0
         for product in products:
             product_id, user_id, name, expires_at = product
             expires_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
@@ -158,25 +184,24 @@ def restore_scheduled_notifications():
             
             if days_left > 0:
                 schedule_notification(product_id, user_id, name, days_left)
+                restored_count += 1
         
         conn.close()
-        logger.info(f"✅ Восстановлено {len(products)} уведомлений")
+        logger.info(f"✅ Восстановлено {restored_count} уведомлений")
     except Exception as e:
         logger.error(f"❌ Ошибка восстановления уведомлений: {e}")
-
-restore_scheduled_notifications()
 
 # Вспомогательные функции
 async def recognize_product(photo_path: str) -> str:
     """Улучшенная заглушка для распознавания продуктов"""
     common_products = {
-        "молочные": ["Молоко", "Йогурт", "Сметана", "Творог", "Сыр", "Кефир", "Сливки", "Масло"],
-        "хлебные": ["Хлеб", "Булочки", "Батон", "Лаваш", "Багет", "Сухари"],
-        "мясные": ["Курица", "Говядина", "Свинина", "Фарш", "Колбаса", "Сосиски", "Бекон"],
-        "рыбные": ["Рыба", "Филе рыбы", "Креветки", "Кальмары", "Мидии", "Икра"],
-        "овощи": ["Помидоры", "Огурцы", "Картофель", "Морковь", "Лук", "Капуста", "Перец"],
-        "фрукты": ["Яблоки", "Бананы", "Апельсины", "Лимоны", "Груши", "Виноград", "Ягоды"],
-        "бакалея": ["Крупа", "Макароны", "Мука", "Сахар", "Соль", "Масло растительное"]
+        "молочные": ["Молоко", "Йогурт", "Сметана", "Творог", "Сыр", "Кефир", "Сливки", "Масло", "Ряженка"],
+        "хлебные": ["Хлеб", "Булочки", "Батон", "Лаваш", "Багет", "Сухари", "Пирожки"],
+        "мясные": ["Курица", "Говядина", "Свинина", "Фарш", "Колбаса", "Сосиски", "Бекон", "Ветчина"],
+        "рыбные": ["Рыба", "Филе рыбы", "Креветки", "Кальмары", "Мидии", "Икра", "Лосось", "Тунец"],
+        "овощи": ["Помидоры", "Огурцы", "Картофель", "Морковь", "Лук", "Капуста", "Перец", "Чеснок"],
+        "фрукты": ["Яблоки", "Бананы", "Апельсины", "Лимоны", "Груши", "Виноград", "Ягоды", "Персики"],
+        "бакалея": ["Крупа", "Макароны", "Мука", "Сахар", "Соль", "Масло растительное", "Рис", "Гречка"]
     }
     
     category = random.choice(list(common_products.keys()))
@@ -780,6 +805,12 @@ async def set_webhook(application):
 
 def main():
     try:
+        # Запускаем health check сервер
+        start_health_check()
+        
+        # Восстанавливаем уведомления
+        restore_scheduled_notifications()
+
         application = Application.builder().token(TOKEN).build()
 
         # Обработчики
@@ -853,5 +884,4 @@ def main():
         scheduler.shutdown()
 
 if __name__ == '__main__':
-    import asyncio
     main()
