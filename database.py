@@ -1,7 +1,7 @@
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from config import DB_NAME
+DB_NAME = 'products.db'
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,8 +40,12 @@ class Database:
     
     def load_products_data(self):
         """Загрузка данных о продуктах"""
-        with open('products.json', 'r', encoding='utf-8') as f:
-            self.products_data = json.load(f)
+        try:
+            with open('products.json', 'r', encoding='utf-8') as f:
+                self.products_data = json.load(f)
+        except FileNotFoundError:
+            logger.warning("products.json не найден, справочник продуктов будет пустым.")
+            self.products_data = {}
     
     def load_recipes_data(self):
         """Загрузка данных о рецептах"""
