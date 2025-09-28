@@ -1,7 +1,10 @@
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from config import DB_NAME
+try:
+    from config import DB_NAME
+except Exception:
+    DB_NAME = 'products.db'
 import logging
 
 logger = logging.getLogger(__name__)

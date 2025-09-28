@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+.env
+.env.*
+
+# Logs
+*.log
+bot.log
+
+# SQLite databases
+*.db
+products.db
+
+# Cache
+.cache/
+
+# Photos/uploads
+photos/
+
+# OS
+.DS_Store
+Thumbs.db
