@@ -1,0 +1,43 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+.cache/
+
+# Type checking
+.mypy_cache/
+.pytype/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Project files to ignore
+bot.log
+products.db
+photos/
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/

@@ -10,8 +10,7 @@ from telegram.ext import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
-from flask import Flask
-import threading
+from health_check import start_health_check
 import asyncio
 
 # Состояния для ConversationHandler
@@ -24,20 +23,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка токена и URL
+# Загрузка токена и URL из окружения (не завершаем выполнение при их отсутствии на этапе импорта)
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
-    logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Amvera → Переменные окружения")
-    exit(1)
+    logger.warning("⚠️ TELEGRAM_BOT_TOKEN не найден в окружении. Бот не будет запущен до указания токена.")
 
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 if not WEBHOOK_URL:
-    logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
-    exit(1)
+    logger.warning("⚠️ WEBHOOK_URL не задан. Бот не будет запущен до указания публичного URL.")
 
-# Инициализация планировщика
+# Инициализация планировщика (запускается в main)
 scheduler = BackgroundScheduler()
-scheduler.start()
 
 # Инициализация базы данных SQLite
 def init_db():
@@ -483,6 +479,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 # --- Планировщик ---
+def send_notification_job(user_id: int, product_name: str, product_id: int):
+    try:
+        asyncio.run(send_notification(user_id, product_name, product_id))
+    except Exception as e:
+        logger.error(f"Ошибка выполнения задачи уведомления: {e}")
+
+
+def check_expired_products_job():
+    try:
+        asyncio.run(check_expired_products())
+    except Exception as e:
+        logger.error(f"Ошибка выполнения ежедневной проверки просрочки: {e}")
+
+
 def schedule_notification(product_id: int, user_id: int, product_name: str, expiration_days: int):
     try:
         notify_time = datetime.now() + timedelta(days=expiration_days - 1)
@@ -494,7 +504,7 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
             pass
             
         scheduler.add_job(
-            send_notification,
+            send_notification_job,
             'date',
             run_date=notify_time,
             args=[user_id, product_name, product_id],
@@ -593,16 +603,8 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
 
-# --- Flask Health Check Server ---
-app = Flask(__name__)
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+# --- Health Check Server ---
+# Запускается через health_check.start_health_check()
 
 # --- Основная функция ---
 async def set_webhook(application):
@@ -613,9 +615,18 @@ async def set_webhook(application):
 
 def main():
     try:
-        # Запускаем Flask в фоновом потоке
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
+        # Проверяем наличие необходимых переменных окружения
+        if not TOKEN or not WEBHOOK_URL:
+            logger.error("❌ Отсутствуют TELEGRAM_BOT_TOKEN или WEBHOOK_URL. Запуск бота невозможен.")
+            # Запускаем только health-check, чтобы платформа считала сервис живым
+            start_health_check()
+            return
+
+        # Запускаем health-check сервер на отдельном порту
+        start_health_check()
+
+        # Запускаем планировщик задач
+        scheduler.start()
 
         application = Application.builder().token(TOKEN).build()
 
@@ -656,19 +667,16 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
         application.add_handler(CommandHandler("start", start))
 
-        # Планировщик
+        # Планировщик ежедневной проверки просроченных продуктов
         scheduler.add_job(
-            check_expired_products,
+            check_expired_products_job,
             'cron',
             hour=9,
             minute=0,
             id='daily_expired_check'
         )
 
-        # Устанавливаем вебхук
-        asyncio.run(set_webhook(application))
-
-        # Запускаем Telegram бота через вебхук
+        # Запускаем Telegram бота через Webhook на основном порту
         PORT = int(os.environ.get('PORT', 8080))
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
         application.run_webhook(
@@ -682,7 +690,10 @@ def main():
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
     finally:
-        scheduler.shutdown()
+        try:
+            scheduler.shutdown()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     main()
