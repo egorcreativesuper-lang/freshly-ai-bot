@@ -53,7 +53,7 @@ def init_db():
                 expiration_days INTEGER NOT NULL,
                 added_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
-                notified BOOLEAN DEFAULT FALSE
+                notified INTEGER DEFAULT 0
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON products(user_id)')
@@ -405,7 +405,7 @@ async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         today = datetime.now().strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT name, expires_at FROM products 
-            WHERE user_id = ? AND expires_at <= ? AND notified = FALSE
+            WHERE user_id = ? AND expires_at <= ? AND notified = 0
             ORDER BY expires_at
         ''', (user_id, today))
         
@@ -494,7 +494,7 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
             pass
             
         scheduler.add_job(
-            send_notification,
+            send_notification_job,
             'date',
             run_date=notify_time,
             args=[user_id, product_name, product_id],
@@ -529,7 +529,7 @@ async def check_expired_products():
         today = datetime.now().strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT DISTINCT user_id FROM products 
-            WHERE expires_at <= ? AND notified = FALSE
+            WHERE expires_at <= ? AND notified = 0
         ''', (today,))
         
         expired_users = cursor.fetchall()
@@ -538,7 +538,7 @@ async def check_expired_products():
             try:
                 cursor.execute('''
                     SELECT name, expires_at FROM products 
-                    WHERE user_id = ? AND expires_at <= ? AND notified = FALSE
+                    WHERE user_id = ? AND expires_at <= ? AND notified = 0
                 ''', (user_id, today))
                 
                 expired_products = cursor.fetchall()
@@ -546,7 +546,7 @@ async def check_expired_products():
                     product_list = "\n".join([f"• {name} (истек {expires_at})" for name, expires_at in expired_products])
                     
                     cursor.execute('''
-                        UPDATE products SET notified = TRUE 
+                        UPDATE products SET notified = 1 
                         WHERE user_id = ? AND expires_at <= ?
                     ''', (user_id, today))
                     conn.commit()
@@ -567,6 +567,15 @@ async def check_expired_products():
         
     except Exception as e:
         logger.error(f"Ошибка в check_expired_products: {e}")
+
+# --- Обёртки для APScheduler (запуск корутин) ---
+
+def send_notification_job(user_id: int, product_name: str, product_id: int):
+    asyncio.run(send_notification(user_id, product_name, product_id))
+
+
+def check_expired_products_job():
+    asyncio.run(check_expired_products())
 
 # --- Обработчик меню ---
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -601,7 +610,7 @@ def health():
     return "OK", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("HEALTH_CHECK_PORT", 8081))
     app.run(host="0.0.0.0", port=port)
 
 # --- Основная функция ---
@@ -658,7 +667,7 @@ def main():
 
         # Планировщик
         scheduler.add_job(
-            check_expired_products,
+            check_expired_products_job,
             'cron',
             hour=9,
             minute=0,
