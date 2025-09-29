@@ -22,11 +22,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 🔑 ВСТРОЕННЫЙ ТОКЕН (ЗАМЕНИТЕ НА СВОЙ!)
+# 🔑 ВСТРОЕННЫЙ ТОКЕН (ОБЯЗАТЕЛЬНО ЗАМЕНИТЕ НА СВОЙ!)
 TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
-
-# URL вашего приложения на Amvera (без слеша в конце!)
-WEBHOOK_URL = "https://freshly-ai-bot.amvera.io"
 
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
@@ -603,22 +600,10 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
 
-# --- Post-init для вебхука ---
-async def post_init(application: Application) -> None:
-    webhook_path = f"/{TOKEN}"
-    full_webhook_url = WEBHOOK_URL + webhook_path
-    await application.bot.set_webhook(url=full_webhook_url)
-    logger.info(f"🌐 Webhook установлен: {full_webhook_url}")
-
-# --- Основная функция ---
+# --- Основная функция (Long Polling) ---
 def main():
     try:
-        application = (
-            Application.builder()
-            .token(TOKEN)
-            .post_init(post_init)
-            .build()
-        )
+        application = Application.builder().token(TOKEN).build()
 
         # Обработчики
         manual_conv_handler = ConversationHandler(
@@ -652,10 +637,10 @@ def main():
             allow_reentry=True
         )
 
+        application.add_handler(CommandHandler("start", start))
         application.add_handler(manual_conv_handler)
         application.add_handler(photo_conv_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
-        application.add_handler(CommandHandler("start", start))
 
         # Планировщик
         scheduler.add_job(
@@ -666,15 +651,8 @@ def main():
             id='daily_expired_check'
         )
 
-        # Запуск через вебхук
-        PORT = int(os.environ.get('PORT', 8080))
-        logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=WEBHOOK_URL + f"/{TOKEN}"
-        )
+        logger.info("🚀 Бот запущен в режиме Long Polling")
+        application.run_polling()
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
