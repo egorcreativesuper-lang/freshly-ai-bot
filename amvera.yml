@@ -1,13 +1,11 @@
-version: '1'
-services:
-  bot:
-    runtime: python3.11
-    build:
-      requirements: requirements.txt
-    run: "python bot.py"
-    ports:
-      - 8080
-    env:
-      - TELEGRAM_BOT_TOKEN
-      - WEBHOOK_URL
-      - WEBHOOK_SECRET
+version: null
+meta:
+  environment: python
+  toolchain:
+    name: pip
+    version: "3.11"
+build:
+  requirementsPath: requirements.txt
+run:
+  containerPort: 8080
+  scriptName: bot.py
