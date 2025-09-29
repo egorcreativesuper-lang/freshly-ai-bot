@@ -1,3 +1,2 @@
-python-telegram-bot==20.7
+python-telegram-bot[webhooks]==20.7
 APScheduler==3.10.4
-Flask==3.0.3  # не используется в основном коде, но можно оставить на случай доработки
