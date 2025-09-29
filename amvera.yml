@@ -4,7 +4,7 @@ services:
     runtime: python3.11
     build:
       requirements: requirements.txt
-    run: "python main.py"
+    run: "python bot.py"
     ports:
       - 8080
     env:
