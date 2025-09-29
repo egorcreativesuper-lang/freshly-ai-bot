@@ -10,9 +10,8 @@ from telegram.ext import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
-from flask import Flask
-import threading
 import asyncio
+import threading
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -34,6 +33,10 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 if not WEBHOOK_URL:
     logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
     exit(1)
+
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'your_strong_secret_here')
+if WEBHOOK_SECRET == 'your_strong_secret_here':
+    logger.warning("⚠️ Используется дефолтный WEBHOOK_SECRET. Задайте свой в переменных окружения!")
 
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
@@ -494,7 +497,7 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
             pass
             
         scheduler.add_job(
-            send_notification,
+            sync_send_notification,
             'date',
             run_date=notify_time,
             args=[user_id, product_name, product_id],
@@ -503,6 +506,23 @@ def schedule_notification(product_id: int, user_id: int, product_name: str, expi
         logger.info(f"Запланировано уведомление для продукта {product_id} пользователя {user_id}")
     except Exception as e:
         logger.error(f"Ошибка планирования уведомления: {e}")
+
+# Синхронные обёртки для APScheduler
+def sync_send_notification(user_id: int, product_name: str, product_id: int):
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_notification(user_id, product_name, product_id))
+    except Exception as e:
+        logger.error(f"Ошибка в sync_send_notification: {e}")
+
+def sync_check_expired_products():
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(check_expired_products())
+    except Exception as e:
+        logger.error(f"Ошибка в sync_check_expired_products: {e}")
 
 async def send_notification(user_id: int, product_name: str, product_id: int):
     try:
@@ -593,31 +613,22 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
 
-# --- Flask Health Check Server ---
-app = Flask(__name__)
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# --- Основная функция ---
-async def set_webhook(application):
+# --- Post-init для вебхука ---
+async def post_init(application: Application) -> None:
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL + webhook_path
-    await application.bot.set_webhook(url=full_webhook_url, secret_token=TOKEN)
+    await application.bot.set_webhook(url=full_webhook_url, secret_token=WEBHOOK_SECRET)
     logger.info(f"🌐 Webhook установлен: {full_webhook_url}")
 
+# --- Основная функция ---
 def main():
     try:
-        # Запускаем Flask в фоновом потоке
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-
-        application = Application.builder().token(TOKEN).build()
+        application = (
+            Application.builder()
+            .token(TOKEN)
+            .post_init(post_init)
+            .build()
+        )
 
         # Обработчики
         manual_conv_handler = ConversationHandler(
@@ -658,17 +669,14 @@ def main():
 
         # Планировщик
         scheduler.add_job(
-            check_expired_products,
+            sync_check_expired_products,
             'cron',
             hour=9,
             minute=0,
             id='daily_expired_check'
         )
 
-        # Устанавливаем вебхук
-        asyncio.run(set_webhook(application))
-
-        # Запускаем Telegram бота через вебхук
+        # Запуск через вебхук
         PORT = int(os.environ.get('PORT', 8080))
         logger.info(f"🚀 Запуск Telegram бота через Webhook на порту {PORT}...")
         application.run_webhook(
@@ -676,7 +684,7 @@ def main():
             port=PORT,
             url_path=TOKEN,
             webhook_url=WEBHOOK_URL + f"/{TOKEN}",
-            secret_token=TOKEN
+            secret_token=WEBHOOK_SECRET
         )
 
     except Exception as e:
