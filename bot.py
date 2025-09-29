@@ -11,7 +11,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 import json
 import asyncio
-import threading
 
 # Состояния для ConversationHandler
 PHOTO_RECOGNITION, CHOOSING_PRODUCT_NAME, CHOOSING_PURCHASE_DATE, CHOOSING_EXPIRATION_DATE = range(4)
@@ -23,20 +22,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка токена и URL
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-if not TOKEN:
-    logger.error("❌ Токен не найден! Добавьте переменную TELEGRAM_BOT_TOKEN в Amvera → Переменные окружения")
-    exit(1)
+# 🔑 ВСТРОЕННЫЙ ТОКЕН (ЗАМЕНИТЕ НА СВОЙ!)
+TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
 
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-if not WEBHOOK_URL:
-    logger.error("❌ WEBHOOK_URL не задан! Укажите публичный URL вашего приложения на Amvera.")
-    exit(1)
-
-WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', 'your_strong_secret_here')
-if WEBHOOK_SECRET == 'your_strong_secret_here':
-    logger.warning("⚠️ Используется дефолтный WEBHOOK_SECRET. Задайте свой в переменных окружения!")
+# URL вашего приложения на Amvera (без слеша в конце!)
+WEBHOOK_URL = "https://freshly-ai-bot.amvera.io"
 
 # Инициализация планировщика
 scheduler = BackgroundScheduler()
@@ -617,7 +607,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def post_init(application: Application) -> None:
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL + webhook_path
-    await application.bot.set_webhook(url=full_webhook_url, secret_token=WEBHOOK_SECRET)
+    await application.bot.set_webhook(url=full_webhook_url)
     logger.info(f"🌐 Webhook установлен: {full_webhook_url}")
 
 # --- Основная функция ---
@@ -683,8 +673,7 @@ def main():
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
-            webhook_url=WEBHOOK_URL + f"/{TOKEN}",
-            secret_token=WEBHOOK_SECRET
+            webhook_url=WEBHOOK_URL + f"/{TOKEN}"
         )
 
     except Exception as e:
