@@ -1,40 +1,13 @@
-app:
-  name: "Freshly-Bot"
-  runtime: "python3.11"
-
-  include:
-    - "bot.py"
-    - "recipes.json"
-    - "bot.log"
-    - "products.db"
-
-  build:
-    - "pip3 install --no-cache-dir -r requirements.txt"
-
-  run:
-    - "python3 bot.py"
-
-  port: 8080
-
-  health_check:
-    path: "/health"
-    port: 8081
-
-  env:
-    TELEGRAM_BOT_TOKEN: "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
-    WEBHOOK_URL: "https://freshly-ai-bot.amvera.io"
-    HEALTH_CHECK_PORT: "8081"
-
-  domain: "freshly-ai-bot"
-
-  storage:
-    size: "1GB"
-
-  resources:
-    cpu: "0.5"
-    memory: "512Mi"
-
-  restart_policy: "always"
-
-  logs:
-    level: "info"
+version: '1'
+services:
+  bot:
+    runtime: python3.11
+    build:
+      requirements: requirements.txt
+    run: "python main.py"
+    ports:
+      - 8080
+    env:
+      - TELEGRAM_BOT_TOKEN
+      - WEBHOOK_URL
+      - WEBHOOK_SECRET
