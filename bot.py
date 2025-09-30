@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 import json
 
-# 🔑 ВСТРОЕННЫЙ ТОКЕН (ТОЛЬКО ДЛЯ ТЕСТА!)
+# 🔑 ВСТРОЕННЫЙ ТОКЕН
 TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
 
 # Состояния
@@ -17,9 +17,8 @@ TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
     PHOTO_RECOGNITION,
     CHOOSING_PRODUCT_NAME,
     CHOOSING_PURCHASE_DATE,
-    CHOOSING_EXPIRATION_DATE,
-    ENTERING_PROMO_CODE
-) = range(5)
+    CHOOSING_EXPIRATION_DATE
+) = range(4)
 
 # Логирование
 logging.basicConfig(
@@ -48,44 +47,11 @@ def init_db():
                     notified BOOLEAN DEFAULT FALSE
                 )
             ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    is_premium BOOLEAN DEFAULT FALSE,
-                    premium_until TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS promo_codes (
-                    code TEXT PRIMARY KEY,
-                    days INTEGER NOT NULL,
-                    max_uses INTEGER,
-                    uses_count INTEGER DEFAULT 0
-                )
-            ''')
             conn.commit()
         logger.info("✅ База данных инициализирована")
     except Exception as e:
         logger.error(f"❌ Ошибка БД: {e}")
         exit(1)
-
-def ensure_promo_codes_exist():
-    """Создаёт промокоды при первом запуске"""
-    promo_list = []
-    for i in range(1, 6):
-        promo_list.append((f"FRESHW{i}", 7, 1))   # Неделя
-        promo_list.append((f"FRESHM{i}", 30, 1))  # Месяц
-        promo_list.append((f"FRESHY{i}", 365, 1)) # Год
-
-    with sqlite3.connect('products.db') as conn:
-        cursor = conn.cursor()
-        for code, days, max_uses in promo_list:
-            cursor.execute('''
-                INSERT OR IGNORE INTO promo_codes (code, days, max_uses)
-                VALUES (?, ?, ?)
-            ''', (code, days, max_uses))
-        conn.commit()
-    logger.info("✅ Промокоды созданы")
 
 # ======================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -100,58 +66,37 @@ def parse_date(date_str: str):
             continue
     return None
 
-def get_user_premium_status(user_id: int) -> bool:
-    with sqlite3.connect('products.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT is_premium, premium_until FROM users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            return False
-        is_premium, premium_until_str = row
-        if not is_premium:
-            return False
-        if premium_until_str:
-            premium_until = datetime.fromisoformat(premium_until_str)
-            if datetime.now() < premium_until:
-                return True
-            else:
-                cursor.execute("UPDATE users SET is_premium = FALSE, premium_until = NULL WHERE user_id = ?", (user_id,))
-                conn.commit()
-                return False
-        return False
-
-def activate_premium(user_id: int, days: int):
-    with sqlite3.connect('products.db') as conn:
-        cursor = conn.cursor()
-        premium_until = datetime.now() + timedelta(days=days)
-        cursor.execute("""
-            INSERT INTO users (user_id, is_premium, premium_until)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                is_premium = TRUE,
-                premium_until = ?
-        """, (user_id, True, premium_until.isoformat(), premium_until.isoformat()))
-        conn.commit()
-
-def get_main_menu_keyboard(is_premium: bool = False):
+def get_main_menu_keyboard():
     keyboard = [
         ["📸 Добавить по фото", "✍️ Добавить вручную"],
         ["📋 Мои продукты", "🚨 Просроченные"],
+        ["📊 Статистика", "👨‍🍳 Рецепты"],
         ["🗑️ Очистить всё", "ℹ️ Помощь"]
     ]
-    if is_premium:
-        keyboard.append(["👨‍🍳 Рецепты", "📊 Статистика"])
-        keyboard.append(["📤 Экспорт", "💎 Премиум"])
-    else:
-        keyboard.append(["💎 Премиум", "🎟️ Промокод"])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
     return ReplyKeyboardMarkup([["❌ Отмена", "🏠 Главное меню"]], resize_keyboard=True, one_time_keyboard=True)
 
 # ======================
-# УВЕДОМЛЕНИЯ (ИСПРАВЛЕННЫЕ!)
+# УВЕДОМЛЕНИЯ С РАЗНЫМ ТЕКСТОМ
 # ======================
+
+EXPIRATION_MESSAGES = [
+    "⚠️ Эй! Твой {product} испортится завтра! Не забудь использовать его!",
+    "🍅 Срочно! {product} ждёт своего часа на кухне — завтра последний день!",
+    "⏰ Внимание! Завтра {product} станет непригодным. Самое время приготовить что-то вкусное!",
+    "🥬 Доброе утро! Напоминаю: завтра {product} испортится. Давай спасём еду вместе!",
+    "🔔 Добрый вечер! У тебя есть ещё один день, чтобы использовать {product}. Не упусти шанс!"
+]
+
+PREMIUM_MESSAGES = [
+    "⏳ Привет! Твой {product} испортится через {days} дней. Может, начнёшь планировать ужин?",
+    "📅 Напоминаю: у тебя есть {days} дней до окончания срока у {product}. Время проявить кулинарные таланты!",
+    "🛒 Совет: через {days} дней закончится срок годности у {product}. Подумай о рецепте заранее!",
+    "🌿 Забота о планете начинается с тебя! Через {days} дней {product} испортится. Давай используем его с умом!",
+    "💡 Идея дня: через {days} дней {product} нужно будет выбросить. А что если приготовить из него что-то вкусное уже сегодня?"
+]
 
 async def send_notification_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -167,26 +112,15 @@ async def send_notification_job(context: ContextTypes.DEFAULT_TYPE):
             if not cursor.fetchone():
                 return
 
-        # Базовое сообщение
         if days_left == 1:
-            text = f"⚠️ *{product_name}* испортится завтра!\n"
+            message_template = random.choice(EXPIRATION_MESSAGES)
+            text = message_template.format(product=product_name)
         else:
-            text = f"⏳ *{product_name}* испортится через {days_left} дней!\n"
+            message_template = random.choice(PREMIUM_MESSAGES)
+            text = message_template.format(product=product_name, days=days_left)
 
-        # Для премиум-пользователей — добавляем рецепт
-        if get_user_premium_status(user_id):
-            suitable_recipes = [
-                r for r in RECIPES 
-                if any(ing.lower() in product_name.lower() for ing in r.get("ingredients", []))
-            ]
-            if suitable_recipes:
-                recipe = suitable_recipes[0]
-                text += f"\n👨‍🍳 *Рецепт:* {recipe['name']}\n{recipe.get('steps', '')}"
-            else:
-                text += "\nМожет, пора готовить?"
-
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
-        logger.info(f"✅ Уведомление отправлено пользователю {user_id}")
+        await context.bot.send_message(chat_id=user_id, text=text)
+        logger.info(f"✅ Уведомление отправлено пользователю {user_id}: {text}")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
@@ -205,7 +139,7 @@ async def check_expired_daily(context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
-                        text=f"🚨 *ПРОСРОЧЕНО:* {name} (срок истёк {expires_at})\nРекомендуем выбросить!",
+                        text=f"🚨 *ПРОСРОЧЕНО:* {name} (срок истёк {expires_at})\nПожалуйста, выбросьте его, чтобы избежать проблем со здоровьем!",
                         parse_mode='Markdown'
                     )
                     cursor.execute("UPDATE products SET notified = TRUE WHERE user_id = ? AND name = ?", (user_id, name))
@@ -216,9 +150,7 @@ async def check_expired_daily(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в check_expired_daily: {e}")
 
 def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, product_name: str, expiration_days: int):
-    is_premium = get_user_premium_status(user_id)
-
-    # Уведомление за 1 день (всем)
+    # Уведомление за 1 день
     if expiration_days >= 1:
         notify_time = datetime.now() + timedelta(days=expiration_days - 1)
         if notify_time > datetime.now():
@@ -229,8 +161,8 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
                 name=f"notify_{user_id}_{product_name}_1d"
             )
 
-    # Уведомление за 3 дня (только премиум)
-    if is_premium and expiration_days > 3:
+    # Уведомление за 3 дня (для всех!)
+    if expiration_days > 3:
         notify_time = datetime.now() + timedelta(days=expiration_days - 3)
         if notify_time > datetime.now():
             context.job_queue.run_once(
@@ -241,15 +173,30 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
             )
 
 # ======================
-# ОБРАБОТЧИКИ ПРЕМИУМ-ФУНКЦИЙ
+# ОБРАБОТЧИКИ
 # ======================
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_text = (
+        "🌟 *Привет, друг! Добро пожаловать в Freshly Bot!*\n\n"
+        "Я — твой личный помощник в борьбе с пищевыми отходами 🌍\n\n"
+        "✨ *Что я умею:*\n"
+        "✅ Отслеживать сроки годности продуктов\n"
+        "✅ Напоминать за 3 и за 1 день до истечения срока\n"
+        "✅ Предлагать рецепты на основе твоих продуктов\n"
+        "✅ Показывать статистику твоих успехов\n\n"
+        "Вместе мы спасём еду, сэкономим деньги и поможем планете! 💚\n\n"
+        "Выбери действие ниже и начни свой путь к осознанному потреблению!"
+    )
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
+
+# --- Статистика (для всех) ---
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not get_user_premium_status(user_id):
-        await update.message.reply_text("📊 Эта функция доступна только в Премиуме!", reply_markup=get_main_menu_keyboard())
-        return
-
     with sqlite3.connect('products.db') as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ?", (user_id,))
@@ -260,92 +207,41 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = cursor.fetchone()[0]
 
     text = (
-        "📊 *Ваша статистика:*\n\n"
-        f"📦 Всего добавлено: {total}\n"
-        f"✅ Активных продуктов: {active}\n"
-        f"🛡️ Спасено от просрочки: {saved}\n\n"
-        "Продолжайте в том же духе! 🌱"
+        "📊 *Твоя личная статистика:*\n\n"
+        f"📦 Всего добавлено продуктов: *{total}*\n"
+        f"✅ Сейчас в холодильнике: *{active}*\n"
+        f"🛡️ Успешно спасено от просрочки: *{saved}*\n\n"
+        "Ты молодец! Каждый продукт, который ты не выбросил — это победа над пищевыми отходами! 🌱"
     )
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(True))
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
-async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not get_user_premium_status(user_id):
-        await update.message.reply_text("📤 Эта функция доступна только в Премиуме!", reply_markup=get_main_menu_keyboard())
-        return
+# --- Рецепты (для всех) ---
+def load_recipes():
+    try:
+        with open('recipes.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return [
+            {"name": "Простой омлет", "ingredients": ["Яйца"], "steps": "Взбей 2 яйца, добавь соль и жарь на сковороде 3-4 минуты."},
+            {"name": "Фруктовый микс", "ingredients": ["Фрукты"], "steps": "Нарежь любимые фрукты и наслаждайся свежим десертом!"},
+            {"name": "Сырный сэндвич", "ingredients": ["Сыр", "Хлеб"], "steps": "Положи ломтик сыра между двумя кусочками хлеба и поджарь на сковороде до золотистой корочки."}
+        ]
 
-    with sqlite3.connect('products.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT name, purchase_date, expires_at FROM products 
-            WHERE user_id = ? ORDER BY expires_at
-        ''', (user_id,))
-        products = cursor.fetchall()
-
-    if not products:
-        await update.message.reply_text("Нет продуктов для экспорта.", reply_markup=get_main_menu_keyboard(True))
-        return
-
-    text = "📋 *Ваши продукты (экспорт):*\n\n"
-    for name, purchase, expires in products:
-        text += f"• {name} | Куплено: {purchase} | Истекает: {expires}\n"
-
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(True))
-
-# ======================
-# ОСТАЛЬНЫЕ ОБРАБОТЧИКИ
-# ======================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    is_premium = get_user_premium_status(user_id)
-    welcome_text = (
-        "🌟 *Добро пожаловать в Freshly Bot!*\n\n"
-        "Я помогу вам не выбрасывать еду и экономить деньги!\n\n"
-        "✨ *Премиум-функции:* рецепты, статистика, экспорт и ранние уведомления."
-    )
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard(is_premium)
-    )
-
-async def premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    is_premium = get_user_premium_status(user_id)
-    if is_premium:
-        await update.message.reply_text(
-            "💎 *Вы уже в Премиуме!*\n\n"
-            "✨ Доступны:\n"
-            "• 👨‍🍳 Рецепты по вашим продуктам\n"
-            "• ⏳ Уведомления за 3 дня\n"
-            "• 📊 Статистика использования\n"
-            "• 📤 Экспорт списка\n\n"
-            "Спасибо, что поддерживаете бота!",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard(True)
-        )
-    else:
-        await update.message.reply_text(
-            "💎 *Попробуйте Премиум бесплатно на 1 день!*\n\n"
-            "Или активируйте полную версию с помощью промокода!",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard(False)
-        )
+RECIPES = load_recipes()
 
 async def recipes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not get_user_premium_status(user_id):
-        await update.message.reply_text("👨‍🍳 Эта функция доступна только в Премиуме!", reply_markup=get_main_menu_keyboard())
-        return
-
     with sqlite3.connect('products.db') as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM products WHERE user_id = ? AND notified = FALSE", (user_id,))
         products = [row[0] for row in cursor.fetchall()]
 
     if not products:
-        await update.message.reply_text("У вас нет активных продуктов для рецептов.", reply_markup=get_main_menu_keyboard(True))
+        await update.message.reply_text(
+            "📦 У тебя пока нет активных продуктов.\n\n"
+            "Добавь хотя бы один продукт через '📸 Добавить по фото' или '✍️ Добавить вручную', и я подскажу, что из него можно приготовить! 👨‍🍳",
+            reply_markup=get_main_menu_keyboard()
+        )
         return
 
     suitable_recipes = []
@@ -356,64 +252,23 @@ async def recipes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not suitable_recipes:
         suitable_recipes = RECIPES[:2]
 
-    text = "👨‍🍳 *Рецепты для вас:*\n\n"
+    text = "👨‍🍳 *Рецепты специально для тебя:*\n\n"
     for r in suitable_recipes[:2]:
         text += f"🔹 *{r['name']}*\nИнгредиенты: {', '.join(r.get('ingredients', []))}\n{r.get('steps', '')}\n\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(True))
+    text += "Готовь с удовольствием и не забывай делиться своими кулинарными успехами! 😋"
 
-# --- Промокоды ---
-async def promo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎟️ *Введите промокод:*\n\n"
-        "Доступные промокоды:\n"
-        "• Неделя: `FRESHW1`–`FRESHW5`\n"
-        "• Месяц: `FRESHM1`–`FRESHM5`\n"
-        "• Год: `FRESHY1`–`FRESHY5`",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardMarkup([["🏠 Главное меню"]], resize_keyboard=True, one_time_keyboard=True)
-    )
-    return ENTERING_PROMO_CODE
-
-async def handle_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    code = update.message.text.strip()
-
-    if code == "🏠 Главное меню":
-        is_premium = get_user_premium_status(user_id)
-        await start(update, context)
-        return ConversationHandler.END
-
-    with sqlite3.connect('products.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT days, max_uses, uses_count FROM promo_codes WHERE code = ?", (code,))
-        row = cursor.fetchone()
-
-        if not row:
-            await update.message.reply_text("❌ Промокод не найден.", reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
-            return ConversationHandler.END
-
-        days, max_uses, uses_count = row
-
-        if max_uses is not None and uses_count >= max_uses:
-            await update.message.reply_text("❌ Промокод уже использован.", reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
-            return ConversationHandler.END
-
-        activate_premium(user_id, days)
-        cursor.execute("UPDATE promo_codes SET uses_count = uses_count + 1 WHERE code = ?", (code,))
-        conn.commit()
-
-        await update.message.reply_text(
-            f"🎉 *Премиум активирован на {days} дней!*\n\n"
-            "Доступны: рецепты, статистика, экспорт и ранние уведомления!",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard(True)
-        )
-        return ConversationHandler.END
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
 # --- Добавление продукта ---
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✏️ Введите название продукта:", reply_markup=get_cancel_keyboard())
+    await update.message.reply_text(
+        "✏️ *Шаг 1/3: Название продукта*\n\n"
+        "Напиши, что ты купил(а)! Например: *Молоко*, *Сыр Моцарелла*, *Куриная грудка*.\n\n"
+        "Не переживай — я помогу отслеживать срок годности! 💪",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
     return CHOOSING_PRODUCT_NAME
 
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,10 +276,18 @@ async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
         return await cancel(update, context)
     if not user_input:
-        await update.message.reply_text("Введите корректное название.")
+        await update.message.reply_text("Пожалуйста, введи корректное название продукта. Например: *Йогурт*.", parse_mode='Markdown')
         return CHOOSING_PRODUCT_NAME
     context.user_data['product_name'] = user_input
-    await update.message.reply_text("📅 Введите дату покупки (ДД.ММ.ГГГГ):", reply_markup=get_cancel_keyboard())
+    await update.message.reply_text(
+        "📅 *Шаг 2/3: Дата покупки*\n\n"
+        "В каком формате удобно ввести дату?\n"
+        "• ДД.ММ.ГГГГ (например, 25.04.2025)\n"
+        "• ГГГГ-ММ-ДД (например, 2025-04-25)\n\n"
+        "Выбери любой — я пойму! 😉",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
     return CHOOSING_PURCHASE_DATE
 
 async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -433,10 +296,22 @@ async def choose_purchase_date(update: Update, context: ContextTypes.DEFAULT_TYP
         return await cancel(update, context)
     parsed_date = parse_date(user_input)
     if parsed_date is None:
-        await update.message.reply_text("Неверный формат даты.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(
+            "😔 Кажется, я не понял дату.\n\n"
+            "Попробуй ещё раз в одном из форматов:\n"
+            "• 25.04.2025\n• 2025-04-25",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
         return CHOOSING_PURCHASE_DATE
     context.user_data['purchase_date'] = parsed_date.isoformat()
-    await update.message.reply_text("📆 Введите дату истечения срока:", reply_markup=get_cancel_keyboard())
+    await update.message.reply_text(
+        "📆 *Шаг 3/3: Дата истечения срока*\n\n"
+        "Когда продукт станет непригодным для употребления?\n"
+        "Введи дату в том же формате, что и покупку.",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
     return CHOOSING_EXPIRATION_DATE
 
 async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,18 +320,33 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
         return await cancel(update, context)
     parsed_date = parse_date(user_input)
     if parsed_date is None:
-        await update.message.reply_text("Неверный формат даты.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(
+            "😔 Не получилось распознать дату.\n\n"
+            "Попробуй, например: *30.04.2025* или *2025-04-30*",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
         return CHOOSING_EXPIRATION_DATE
 
     today = datetime.now().date()
     if parsed_date < today:
-        await update.message.reply_text("Дата истечения не может быть в прошлом.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(
+            "❌ Ой! Дата истечения не может быть в прошлом.\n\n"
+            "Проверь, пожалуйста, и введи корректную дату.",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
         return CHOOSING_EXPIRATION_DATE
 
     purchase_date = datetime.strptime(context.user_data['purchase_date'], '%Y-%m-%d').date()
     expiration_days = (parsed_date - purchase_date).days
     if expiration_days < 0:
-        await update.message.reply_text("Дата истечения раньше покупки.", reply_markup=get_main_menu_keyboard(get_user_premium_status(update.effective_user.id)))
+        await update.message.reply_text(
+            "❌ Дата истечения не может быть раньше даты покупки.\n\n"
+            "Давай попробуем заново!",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
         return ConversationHandler.END
 
     user_id = update.effective_user.id
@@ -475,39 +365,75 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
         schedule_notifications(context, user_id, product_name, expiration_days)
 
+        success_text = (
+            f"🎉 *Ура! Продукт добавлен!*\n\n"
+            f"🔹 *Название:* {product_name}\n"
+            f"📅 *Куплено:* {purchase_date_str}\n"
+            f"📆 *Истекает:* {expires_at_str}\n"
+            f"⏳ *Срок годности:* {expiration_days} дней\n\n"
+            "🔔 Я напомню тебе:\n"
+            "• За 3 дня до окончания срока\n"
+            "• И за 1 день — последнее напоминание!\n\n"
+            "Ты делаешь мир лучше — спасибо! 🌍"
+        )
+
         await update.message.reply_text(
-            f"🎉 Продукт добавлен!\n\n🔹 {product_name}\n📆 Истекает: {expires_at_str}\n⏳ Срок: {expiration_days} дней",
+            success_text,
             parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id))
+            reply_markup=get_main_menu_keyboard()
         )
     except Exception as e:
-        logger.error(f"Ошибка сохранения: {e}")
-        await update.message.reply_text("❌ Ошибка сохранения.", reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
+        logger.error(f"Ошибка сохранения продукта: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при сохранении. Попробуй ещё раз.", reply_markup=get_main_menu_keyboard())
 
     return ConversationHandler.END
 
 # --- Фото ---
 async def recognize_product(photo_path: str) -> str:
-    products = ["Молоко", "Хлеб", "Яйца", "Сыр", "Йогурт", "Мясо", "Рыба", "Овощи", "Фрукты"]
+    products = ["Молоко", "Хлеб", "Яйца", "Сыр", "Йогурт", "Мясо", "Рыба", "Овощи", "Фрукты", "Курица", "Говядина", "Помидоры", "Огурцы"]
     return random.choice(products)
 
 async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Отправьте фото продукта!", reply_markup=get_cancel_keyboard())
+    await update.message.reply_text(
+        "📸 *Добавление по фото*\n\n"
+        "Отправь мне фото упаковки продукта — я постараюсь распознать его название!\n\n"
+        "💡 Совет: сделай чёткое фото этикетки при хорошем освещении.",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
     return PHOTO_RECOGNITION
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    photo_file = await update.message.photo[-1].get_file()
-    file_id = update.message.photo[-1].file_id
-    photo_path = f"photos/photo_{user_id}_{file_id[-10:]}.jpg"
-    os.makedirs("photos", exist_ok=True)
-    await photo_file.download_to_drive(photo_path)
-    product_name = await recognize_product(photo_path)
-    os.remove(photo_path)
+    try:
+        user_id = update.effective_user.id
+        os.makedirs("photos", exist_ok=True)
+        
+        photo_file = await update.message.photo[-1].get_file()
+        file_id = update.message.photo[-1].file_id
+        photo_hash = file_id[-10:]
+        photo_path = f"photos/photo_{user_id}_{photo_hash}.jpg"
+        await photo_file.download_to_drive(photo_path)
 
-    context.user_data['product_name'] = product_name
-    await update.message.reply_text(f"🤖 Распознан: {product_name}\n📅 Введите дату покупки:", reply_markup=get_cancel_keyboard())
-    return CHOOSING_PURCHASE_DATE
+        product_name = await recognize_product(photo_path)
+        os.remove(photo_path)
+
+        context.user_data['product_name'] = product_name
+        await update.message.reply_text(
+            f"🤖 *Отлично! Я распознал: {product_name}*\n\n"
+            "📅 Теперь введи дату покупки (например, 25.04.2025):",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return CHOOSING_PURCHASE_DATE
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке фото.\n\n"
+            "Попробуй отправить фото ещё раз или добавь продукт вручную.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
 
 # --- Прочие обработчики ---
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -520,10 +446,15 @@ async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TY
         products = cursor.fetchall()
 
     if not products:
-        await update.message.reply_text("📦 Пока нет продуктов.", reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
+        await update.message.reply_text(
+            "📦 *Твой холодильник пуст!*\n\n"
+            "Добавь первый продукт — и я помогу тебе не пропустить срок его годности! 💚",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
         return
 
-    text = "📋 *Ваши продукты:*\n\n"
+    text = "📋 *Твои продукты:*\n\n"
     today = datetime.now().date()
     for name, expires_at in products:
         exp_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
@@ -531,16 +462,18 @@ async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if days_left < 0:
             status = "🔴 ПРОСРОЧЕНО"
         elif days_left == 0:
-            status = "🔴 Сегодня!"
+            status = "🔴 Истекает сегодня!"
         elif days_left == 1:
-            status = "🟠 Завтра"
+            status = "🟠 Истекает завтра"
         elif days_left <= 3:
-            status = f"🟡 Через {days_left} дня"
+            status = f"🟡 Истекает через {days_left} дня"
         else:
             status = f"🟢 Ещё {days_left} дней"
         text += f"• *{name}* — {status}\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
+    text += "\n💡 Совет: регулярно проверяй этот список, чтобы ничего не пропустить!"
+
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
 async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -554,14 +487,14 @@ async def show_expired_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         expired = cursor.fetchall()
 
     if not expired:
-        text = "✅ Просроченных продуктов нет!"
+        text = "✅ *Поздравляю! У тебя нет просроченных продуктов!*\n\nТы отлично справляешься! 🌟"
     else:
         text = "🚨 *Просроченные продукты:*\n\n"
         for name, expires_at in expired:
-            text += f"• *{name}* — истек {expires_at}\n"
-        text += "\n❌ Рекомендуем выбросить!"
+            text += f"• *{name}* — срок истёк {expires_at}\n"
+        text += "\n❌ Пожалуйста, выбрось их, чтобы избежать риска для здоровья!"
 
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
 async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -569,29 +502,43 @@ async def clear_products_handler(update: Update, context: ContextTypes.DEFAULT_T
         cursor = conn.cursor()
         cursor.execute('DELETE FROM products WHERE user_id = ?', (user_id,))
         conn.commit()
-    await update.message.reply_text("🗑️ Все продукты удалены!", reply_markup=get_main_menu_keyboard(get_user_premium_status(user_id)))
+    await update.message.reply_text(
+        "🗑️ *Все продукты удалены!*\n\n"
+        "Твой список чист. Готов добавить новые продукты? 😊",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "ℹ️ *Как пользоваться Freshly Bot:*\n\n"
+        "1️⃣ *Добавить продукт:*\n"
+        "   • Нажми '📸 Добавить по фото' и отправь снимок упаковки.\n"
+        "   • Или '✍️ Добавить вручную' — введи название и даты.\n\n"
+        "2️⃣ *Получать напоминания:*\n"
+        "   • Я автоматически напомню за 3 и за 1 день до окончания срока!\n\n"
+        "3️⃣ *Использовать функции:*\n"
+        "   • '📋 Мои продукты' — текущий список\n"
+        "   • '📊 Статистика' — твои достижения\n"
+        "   • '👨‍🍳 Рецепты' — идеи для приготовления\n\n"
+        "🌱 Вместе мы сокращаем пищевые отходы и заботимся о планете!"
+    )
     await update.message.reply_text(
-        "ℹ️ *Как пользоваться:*\n\n"
-        "1. Добавьте продукт по фото или вручную\n"
-        "2. Бот напомнит за день до истечения\n"
-        "3. В Премиуме — рецепты, статистика, экспорт и напоминания за 3 дня\n"
-        "4. Используйте промокоды для активации Премиума!",
+        help_text,
         parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard(get_user_premium_status(update.effective_user.id))
+        reply_markup=get_main_menu_keyboard()
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_premium = get_user_premium_status(update.effective_user.id)
-    await update.message.reply_text('✅ Отменено.', reply_markup=get_main_menu_keyboard(is_premium))
+    await update.message.reply_text(
+        '✅ Операция отменена.\n\nВозвращайся, когда будешь готов(а) добавить продукт! 💚',
+        reply_markup=get_main_menu_keyboard()
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
 async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    user_id = update.effective_user.id
-    is_premium = get_user_premium_status(user_id)
 
     handlers = {
         "🏠 Главное меню": start,
@@ -600,13 +547,10 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "✍️ Добавить вручную": start_add_manually,
         "📋 Мои продукты": list_products_handler,
         "🚨 Просроченные": show_expired_handler,
+        "📊 Статистика": stats_handler,
+        "👨‍🍳 Рецепты": recipes_handler,
         "🗑️ Очистить всё": clear_products_handler,
         "ℹ️ Помощь": help_handler,
-        "💎 Премиум": premium_handler,
-        "🎟️ Промокод": promo_handler,
-        "👨‍🍳 Рецепты": recipes_handler,
-        "📊 Статистика": stats_handler,
-        "📤 Экспорт": export_handler,
     }
 
     if text in handlers:
@@ -615,27 +559,15 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             return await handlers[text](update, context)
     else:
-        await update.message.reply_text("Используйте кнопки меню.", reply_markup=get_main_menu_keyboard(is_premium))
+        await update.message.reply_text("Пожалуйста, используй кнопки меню.", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
-
-# --- Загрузка рецептов ---
-def load_recipes():
-    try:
-        with open('recipes.json', 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return [{"name": "Омлет", "ingredients": ["Яйца"], "steps": "Взбейте яйца и пожарьте."}]
-
-RECIPES = load_recipes()
 
 # --- Основная функция ---
 def main():
     init_db()
-    ensure_promo_codes_exist()
 
     application = Application.builder().token(TOKEN).build()
 
-    # Обработчики диалогов
     manual_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^✍️ Добавить вручную$"), start_add_manually)],
         states={
@@ -658,25 +590,15 @@ def main():
         allow_reentry=True
     )
 
-    promo_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🎟️ Промокод$"), promo_handler)],
-        states={
-            ENTERING_PROMO_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_promo_code)],
-        },
-        fallbacks=[MessageHandler(filters.Regex("^🏠 Главное меню$"), start)],
-        allow_reentry=True
-    )
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(manual_conv)
     application.add_handler(photo_conv)
-    application.add_handler(promo_conv)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
 
-    # Ежедневная проверка просрочки
+    # Ежедневная проверка просрочки в 9:00
     application.job_queue.run_daily(check_expired_daily, time(hour=9, minute=0))
 
-    logger.info("🚀 Бот запущен")
+    logger.info("🚀 Freshly Bot запущен!")
     application.run_polling()
 
 if __name__ == '__main__':
