@@ -8,10 +8,9 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 )
 import json
-from dotenv import load_dotenv
 
-# Загружаем .env
-load_dotenv()
+# 🔑 ВСТРОЕННЫЙ ТОКЕН (ТОЛЬКО ДЛЯ ТЕСТА!)
+TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
 
 # Состояния
 (
@@ -28,10 +27,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN не задан в .env")
 
 # ======================
 # БАЗА ДАННЫХ
@@ -298,7 +293,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard(True))
 
 # ======================
-# ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (БЕЗ ИЗМЕНЕНИЙ)
+# ОСТАЛЬНЫЕ ОБРАБОТЧИКИ
 # ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -416,7 +411,7 @@ async def handle_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# --- Добавление продукта (без изменений) ---
+# --- Добавление продукта ---
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✏️ Введите название продукта:", reply_markup=get_cancel_keyboard())
     return CHOOSING_PRODUCT_NAME
