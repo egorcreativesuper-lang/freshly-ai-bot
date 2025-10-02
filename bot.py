@@ -105,13 +105,6 @@ async def send_notification_job(context: ContextTypes.DEFAULT_TYPE):
     days_left = job.data.get("days_left", 1)
 
     try:
-        # Проверяем, существует ли продукт
-        with sqlite3.connect('products.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM products WHERE user_id = ? AND name = ? AND notified = FALSE", (user_id, product_name))
-            if not cursor.fetchone():
-                return
-
         if days_left == 1:
             message_template = random.choice(EXPIRATION_MESSAGES)
             text = message_template.format(product=product_name)
@@ -150,27 +143,80 @@ async def check_expired_daily(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в check_expired_daily: {e}")
 
 def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, product_name: str, expiration_days: int):
-    # Уведомление за 1 день
+    today = datetime.now().date()
+    expires_at = today + timedelta(days=expiration_days)
+
+    # Уведомление за 1 день → в 9:00 за день до истечения
     if expiration_days >= 1:
-        notify_time = datetime.now() + timedelta(days=expiration_days - 1)
-        if notify_time > datetime.now():
+        notify_date_1d = expires_at - timedelta(days=1)
+        notify_time_1d = datetime.combine(notify_date_1d, time(hour=9, minute=0))
+        if notify_time_1d > datetime.now():
             context.job_queue.run_once(
                 send_notification_job,
-                when=notify_time,
+                when=notify_time_1d,
                 data={"user_id": user_id, "product_name": product_name, "days_left": 1},
                 name=f"notify_{user_id}_{product_name}_1d"
             )
 
-    # Уведомление за 3 дня (для всех!)
+    # Уведомление за 3 дня
     if expiration_days > 3:
-        notify_time = datetime.now() + timedelta(days=expiration_days - 3)
-        if notify_time > datetime.now():
+        notify_date_3d = expires_at - timedelta(days=3)
+        notify_time_3d = datetime.combine(notify_date_3d, time(hour=9, minute=0))
+        if notify_time_3d > datetime.now():
             context.job_queue.run_once(
                 send_notification_job,
-                when=notify_time,
+                when=notify_time_3d,
                 data={"user_id": user_id, "product_name": product_name, "days_left": 3},
                 name=f"notify_{user_id}_{product_name}_3d"
             )
+
+def restore_scheduled_jobs(application: Application):
+    """Восстанавливает задачи уведомлений из базы данных при запуске."""
+    logger.info("🔄 Восстановление запланированных уведомлений...")
+    today = datetime.now().date()
+
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT user_id, name, expiration_days, expires_at
+            FROM products
+            WHERE notified = FALSE AND expires_at >= ?
+        ''', (today.isoformat(),))
+        products = cursor.fetchall()
+
+    restored_count = 0
+    for user_id, name, expiration_days, expires_at in products:
+        exp_date = datetime.strptime(expires_at, '%Y-%m-%d').date()
+        days_until_expiry = (exp_date - today).days
+
+        if days_until_expiry < 0:
+            continue
+
+        # Уведомление за 1 день
+        if days_until_expiry >= 1:
+            notify_time_1d = datetime.combine(exp_date - timedelta(days=1), time(hour=9, minute=0))
+            if notify_time_1d > datetime.now():
+                application.job_queue.run_once(
+                    send_notification_job,
+                    when=notify_time_1d,
+                    data={"user_id": user_id, "product_name": name, "days_left": 1},
+                    name=f"notify_{user_id}_{name}_1d"
+                )
+                restored_count += 1
+
+        # Уведомление за 3 дня
+        if days_until_expiry > 3:
+            notify_time_3d = datetime.combine(exp_date - timedelta(days=3), time(hour=9, minute=0))
+            if notify_time_3d > datetime.now():
+                application.job_queue.run_once(
+                    send_notification_job,
+                    when=notify_time_3d,
+                    data={"user_id": user_id, "product_name": name, "days_left": 3},
+                    name=f"notify_{user_id}_{name}_3d"
+                )
+                restored_count += 1
+
+    logger.info(f"✅ Восстановлено {restored_count} уведомлений.")
 
 # ======================
 # ОБРАБОТЧИКИ
@@ -597,6 +643,9 @@ def main():
 
     # Ежедневная проверка просрочки в 9:00
     application.job_queue.run_daily(check_expired_daily, time(hour=9, minute=0))
+
+    # 🔁 Восстановление задач при запуске
+    restore_scheduled_jobs(application)
 
     logger.info("🚀 Freshly Bot запущен!")
     application.run_polling()
