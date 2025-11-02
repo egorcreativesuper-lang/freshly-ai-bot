@@ -2,6 +2,8 @@ import logging
 import sqlite3
 import os
 import random
+import csv
+from io import StringIO
 from datetime import datetime, timedelta, time
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -11,6 +13,9 @@ import json
 
 # 🔑 ВСТРОЕННЫЙ ТОКЕН
 TOKEN = "8123646923:AAERiVrcFss2IubX3SMUJI12c9qHbX2KRgA"
+
+# 👤 ID АДМИНА (твой Telegram ID)
+ADMIN_USER_ID = 7334272040
 
 # Состояния
 (
@@ -47,6 +52,20 @@ def init_db():
                     notified BOOLEAN DEFAULT FALSE
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    premium_until TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS promo_codes (
+                    code TEXT PRIMARY KEY,
+                    days INTEGER NOT NULL,
+                    max_uses INTEGER NOT NULL,
+                    used_count INTEGER DEFAULT 0
+                )
+            ''')
             conn.commit()
         logger.info("✅ База данных инициализирована")
     except Exception as e:
@@ -71,15 +90,40 @@ def get_main_menu_keyboard():
         ["📸 Добавить по фото", "✍️ Добавить вручную"],
         ["📋 Мои продукты", "🚨 Просроченные"],
         ["📊 Статистика", "👨‍🍳 Рецепты"],
-        ["🗑️ Очистить всё", "ℹ️ Помощь"]
+        ["💎 Получить Premium", "🗑️ Очистить всё"],
+        ["ℹ️ Помощь"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_cancel_keyboard():
     return ReplyKeyboardMarkup([["❌ Отмена", "🏠 Главное меню"]], resize_keyboard=True, one_time_keyboard=True)
 
+def get_premium_days_left(user_id: int) -> int:
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT premium_until FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            return 0
+        try:
+            premium_until = datetime.strptime(row[0], '%Y-%m-%d').date()
+            days_left = (premium_until - datetime.now().date()).days
+            return max(0, days_left)
+        except Exception:
+            return 0
+
+def is_premium(user_id: int) -> bool:
+    return get_premium_days_left(user_id) > 0
+
+def grant_premium(user_id: int, days: int):
+    new_until = datetime.now().date() + timedelta(days=days)
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO users (user_id, premium_until) VALUES (?, ?)", (user_id, new_until.isoformat()))
+        conn.commit()
+
 # ======================
-# УВЕДОМЛЕНИЯ С РАЗНЫМ ТЕКСТОМ
+# УВЕДОМЛЕНИЯ
 # ======================
 
 EXPIRATION_MESSAGES = [
@@ -146,7 +190,7 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
     today = datetime.now().date()
     expires_at = today + timedelta(days=expiration_days)
 
-    # Уведомление за 1 день → в 9:00 за день до истечения
+    # Уведомление за 1 день
     if expiration_days >= 1:
         notify_date_1d = expires_at - timedelta(days=1)
         notify_time_1d = datetime.combine(notify_date_1d, time(hour=9, minute=0))
@@ -158,7 +202,7 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
                 name=f"notify_{user_id}_{product_name}_1d"
             )
 
-    # Уведомление за 3 дня
+    # Уведомление за 3 дня (для всех)
     if expiration_days > 3:
         notify_date_3d = expires_at - timedelta(days=3)
         notify_time_3d = datetime.combine(notify_date_3d, time(hour=9, minute=0))
@@ -170,8 +214,19 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
                 name=f"notify_{user_id}_{product_name}_3d"
             )
 
+    # ✨ Премиум: уведомление за 7 дней
+    if is_premium(user_id) and expiration_days > 7:
+        notify_date_7d = expires_at - timedelta(days=7)
+        notify_time_7d = datetime.combine(notify_date_7d, time(hour=9, minute=0))
+        if notify_time_7d > datetime.now():
+            context.job_queue.run_once(
+                send_notification_job,
+                when=notify_time_7d,
+                data={"user_id": user_id, "product_name": product_name, "days_left": 7},
+                name=f"notify_{user_id}_{product_name}_7d"
+            )
+
 def restore_scheduled_jobs(application: Application):
-    """Восстанавливает задачи уведомлений из базы данных при запуске."""
     logger.info("🔄 Восстановление запланированных уведомлений...")
     today = datetime.now().date()
 
@@ -192,7 +247,6 @@ def restore_scheduled_jobs(application: Application):
         if days_until_expiry < 0:
             continue
 
-        # Уведомление за 1 день
         if days_until_expiry >= 1:
             notify_time_1d = datetime.combine(exp_date - timedelta(days=1), time(hour=9, minute=0))
             if notify_time_1d > datetime.now():
@@ -204,7 +258,6 @@ def restore_scheduled_jobs(application: Application):
                 )
                 restored_count += 1
 
-        # Уведомление за 3 дня
         if days_until_expiry > 3:
             notify_time_3d = datetime.combine(exp_date - timedelta(days=3), time(hour=9, minute=0))
             if notify_time_3d > datetime.now():
@@ -216,13 +269,183 @@ def restore_scheduled_jobs(application: Application):
                 )
                 restored_count += 1
 
+        if is_premium(user_id) and days_until_expiry > 7:
+            notify_time_7d = datetime.combine(exp_date - timedelta(days=7), time(hour=9, minute=0))
+            if notify_time_7d > datetime.now():
+                application.job_queue.run_once(
+                    send_notification_job,
+                    when=notify_time_7d,
+                    data={"user_id": user_id, "product_name": name, "days_left": 7},
+                    name=f"notify_{user_id}_{name}_7d"
+                )
+                restored_count += 1
+
     logger.info(f"✅ Восстановлено {restored_count} уведомлений.")
 
 # ======================
-# ОБРАБОТЧИКИ
+# АДМИН-КОМАНДЫ
+# ======================
+
+async def give_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🚫 Доступ запрещён.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text("Использование: /give_premium <user_id> <дней>\nПример: /give_premium 987654321 7")
+        return
+
+    try:
+        user_id = int(context.args[0])
+        days = int(context.args[1])
+        if days <= 0 or days > 3650:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Неверный формат. Дни — целое число от 1 до 3650.")
+        return
+
+    grant_premium(user_id, days)
+    await update.message.reply_text(f"✅ Пользователю {user_id} выдан Premium на {days} дней.")
+
+async def list_promo_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🚫 Доступ запрещён.")
+        return
+
+    try:
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT code, days, max_uses, used_count FROM promo_codes ORDER BY days, code")
+            rows = cursor.fetchall()
+
+        if not rows:
+            await update.message.reply_text("📭 Нет созданных промокодов.")
+            return
+
+        text = "🎟️ *Список промокодов:*\n\n"
+        for code, days, max_uses, used_count in rows:
+            status = "♾️ безлимитный" if max_uses == 0 else f"{used_count}/{max_uses} использовано"
+            text += f"▫️ `{code}` → {days} дней | {status}\n"
+
+        text += "\n💡 Совет: Используй понятные имена: MONTH30, GIFT7, YEAR2025"
+        await update.message.reply_text(text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Ошибка при выводе промокодов: {e}")
+        await update.message.reply_text("❌ Ошибка при получении списка.")
+
+async def create_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🚫 Доступ запрещён.")
+        return
+
+    if len(context.args) != 3:
+        await update.message.reply_text(
+            "🔤 Использование:\n"
+            "/create_promo <КОД> <ДНЕЙ> <МАКС_ИСПОЛЬЗОВАНИЙ>\n\n"
+            "• КОД — любое слово (латиница, цифры, без пробелов)\n"
+            "• ДНЕЙ — 7, 30, 365 и т.д.\n"
+            "• МАКС_ИСПОЛЬЗОВАНИЙ — 0 = безлимитный\n\n"
+            "Пример: `/create_promo WELCOME7 7 50`"
+        )
+        return
+
+    code = context.args[0].strip().upper()
+    try:
+        days = int(context.args[1])
+        max_uses = int(context.args[2])
+        if days <= 0 or days > 3650:
+            raise ValueError("Неверное количество дней")
+        if max_uses < 0:
+            raise ValueError("Макс. использования не может быть отрицательным")
+    except (ValueError, TypeError):
+        await update.message.reply_text("❌ Ошибка: дни и лимит должны быть целыми числами. Лимит ≥ 0.")
+        return
+
+    if len(code) < 3 or not code.replace("_", "").replace("-", "").isalnum():
+        await update.message.reply_text("❌ Код должен быть ≥3 символов и содержать только буквы, цифры, _ или -")
+        return
+
+    try:
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO promo_codes (code, days, max_uses) VALUES (?, ?, ?)", (code, days, max_uses))
+            conn.commit()
+        status = "безлимитный" if max_uses == 0 else f"макс. {max_uses} раз(а)"
+        await update.message.reply_text(
+            f"✅ Промокод создан!\n\n"
+            f"🎟️ Код: `{code}`\n"
+            f"⏳ Срок: {days} дней\n"
+            f"🔁 Использований: {status}\n\n"
+            f"Ссылка для пользователей:\n"
+            f"`/promo {code}`"
+        )
+    except sqlite3.IntegrityError:
+        await update.message.reply_text(f"❌ Промокод `{code}` уже существует!")
+    except Exception as e:
+        logger.error(f"Ошибка создания промокода: {e}")
+        await update.message.reply_text("❌ Не удалось создать промокод.")
+
+async def activate_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text(
+            "🎟️ Используй: /promo ABC123\n\n"
+            "Получи Premium с помощью промокода от разработчика!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    code = context.args[0].strip().upper()
+    
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT days, max_uses, used_count FROM promo_codes WHERE code = ?", (code,))
+        promo = cursor.fetchone()
+        
+        if not promo:
+            await update.message.reply_text("❌ Такой промокод не существует.")
+            return
+
+        days, max_uses, used_count = promo
+
+        if max_uses > 0 and used_count >= max_uses:
+            await update.message.reply_text("🚫 Этот промокод уже исчерпан.")
+            return
+
+        cursor.execute("SELECT premium_until FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        current_until = row[0] if row else None
+        if current_until:
+            try:
+                if datetime.strptime(current_until, '%Y-%m-%d').date() > datetime.now().date():
+                    await update.message.reply_text("ℹ️ У тебя уже есть активный Premium. Используй промокод после его окончания.")
+                    return
+            except:
+                pass
+
+        grant_premium(user_id, days)
+        cursor.execute("UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?", (code,))
+        conn.commit()
+
+        await update.message.reply_text(
+            f"🎉 Ура! Ты активировал промокод!\n\n"
+            f"💎 Premium активен на **{days} дней**.\n"
+            f"Наслаждайся расширенными функциями!",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+
+# ======================
+# ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ
 # ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+
     welcome_text = (
         "🌟 *Привет, друг! Добро пожаловать в Freshly Bot!*\n\n"
         "Я — твой личный помощник в борьбе с пищевыми отходами 🌍\n\n"
@@ -231,6 +454,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Напоминать за 3 и за 1 день до истечения срока\n"
         "✅ Предлагать рецепты на основе твоих продуктов\n"
         "✅ Показывать статистику твоих успехов\n\n"
+        "💎 В Premium-версии: уведомления за 7 дней, неограниченные продукты, экспорт, умные рецепты и многое другое!\n\n"
         "Вместе мы спасём еду, сэкономим деньги и поможем планете! 💚\n\n"
         "Выбери действие ниже и начни свой путь к осознанному потреблению!"
     )
@@ -240,14 +464,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu_keyboard()
     )
 
-# --- Статистика (для всех) ---
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with sqlite3.connect('products.db') as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ?", (user_id,))
         total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ? AND notified = TRUE AND expires_at > ?", (user_id, datetime.now().date().isoformat()))
+        cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ? AND notified = TRUE", (user_id,))
         saved = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ? AND expires_at >= ?", (user_id, datetime.now().date().isoformat()))
         active = cursor.fetchone()[0]
@@ -261,7 +484,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
-# --- Рецепты (для всех) ---
 def load_recipes():
     try:
         with open('recipes.json', 'r', encoding='utf-8') as f:
@@ -277,10 +499,12 @@ RECIPES = load_recipes()
 
 async def recipes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    is_premium_user = is_premium(user_id)
+
     with sqlite3.connect('products.db') as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM products WHERE user_id = ? AND notified = FALSE", (user_id,))
-        products = [row[0] for row in cursor.fetchall()]
+        products = [row[0].lower() for row in cursor.fetchall()]
 
     if not products:
         await update.message.reply_text(
@@ -291,12 +515,19 @@ async def recipes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     suitable_recipes = []
-    for recipe in RECIPES:
-        if any(ing.lower() in p.lower() for p in products for ing in recipe.get("ingredients", [])):
-            suitable_recipes.append(recipe)
 
-    if not suitable_recipes:
-        suitable_recipes = RECIPES[:2]
+    if is_premium_user:
+        for recipe in RECIPES:
+            matched = [ing for ing in recipe.get("ingredients", []) if any(ing.lower() in p for p in products)]
+            if len(matched) >= 2:
+                suitable_recipes.append(recipe)
+        if not suitable_recipes:
+            suitable_recipes = [r for r in RECIPES if any(ing.lower() in p for p in products for ing in r.get("ingredients", []))][:2]
+    else:
+        suitable_recipes = [
+            r for r in RECIPES
+            if any(ing.lower() in p for p in products for ing in r.get("ingredients", []))
+        ][:2]
 
     text = "👨‍🍳 *Рецепты специально для тебя:*\n\n"
     for r in suitable_recipes[:2]:
@@ -304,10 +535,80 @@ async def recipes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text += "Готовь с удовольствием и не забывай делиться своими кулинарными успехами! 😋"
 
+    if not is_premium_user:
+        text += "\n💎 Хочешь **рецепты по 2+ ингредиентам**? Получи Premium!"
+
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
+
+async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        await update.message.reply_text(
+            "Эта функция доступна только в 💎 Premium.\n\nНажми «💎 Получить Premium» в меню!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    with sqlite3.connect('products.db') as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT name, purchase_date, expires_at, expiration_days
+            FROM products WHERE user_id = ?
+            ORDER BY expires_at
+        ''', (user_id,))
+        rows = cursor.fetchall()
+
+    if not rows:
+        await update.message.reply_text("У тебя пока нет продуктов для экспорта.", reply_markup=get_main_menu_keyboard())
+        return
+
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Название", "Дата покупки", "Истекает", "Срок (дней)"])
+    writer.writerows(rows)
+    output.seek(0)
+
+    await update.message.reply_document(
+        document=output.getvalue().encode("utf-8-sig"),
+        filename="freshly_products.csv",
+        caption="📊 Вот твой экспорт! Можно открыть в Excel или Google Таблицах."
+    )
+
+async def premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    creator_link = "https://t.me/freshlyai_support"
+    user_id = update.effective_user.id
+    text = (
+        "💎 *Freshly Premium — выбери план!*\n\n"
+        "🔹 **7 дней** — 99 ₽ (отлично для теста)\n"
+        "🔹 **30 дней** — 249 ₽ (лучшее соотношение)\n"
+        "🔹 **365 дней** — 799 ₽ (~2.2 ₽ в день!)\n\n"
+        "✨ Что входит:\n"
+        "• Уведомления за 7 / 5 / 3 / 1 день\n"
+        "• Неограниченные продукты\n"
+        "• Умные рецепты по 2+ ингредиентам\n"
+        "• Экспорт списка в CSV\n"
+        "• История просрочек\n\n"
+        f"📩 Напиши мне: {creator_link}\n"
+        f"Укажи желаемый срок и свой ID: `{user_id}`"
+    )
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
 # --- Добавление продукта ---
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ? AND notified = FALSE", (user_id,))
+            active_count = cursor.fetchone()[0]
+            if active_count >= 10:
+                await update.message.reply_text(
+                    "🚫 Бесплатная версия позволяет отслеживать до 10 активных продуктов.\n\n"
+                    "💎 Хочешь больше? Получи Premium: нажми «💎 Получить Premium» в меню!",
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return ConversationHandler.END
+
     await update.message.reply_text(
         "✏️ *Шаг 1/3: Название продукта*\n\n"
         "Напиши, что ты купил(а)! Например: *Молоко*, *Сыр Моцарелла*, *Куриная грудка*.\n\n"
@@ -316,6 +617,8 @@ async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=get_cancel_keyboard()
     )
     return CHOOSING_PRODUCT_NAME
+
+# ... остальные обработчики добавления (choose_product_name и т.д.) остаются без изменений ...
 
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
@@ -419,9 +722,15 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
             f"⏳ *Срок годности:* {expiration_days} дней\n\n"
             "🔔 Я напомню тебе:\n"
             "• За 3 дня до окончания срока\n"
-            "• И за 1 день — последнее напоминание!\n\n"
-            "Ты делаешь мир лучше — спасибо! 🌍"
+            "• И за 1 день — последнее напоминание!\n"
         )
+
+        if is_premium(user_id):
+            success_text += "✨ А ещё — за 7 дней, ведь ты в Premium!\n\n"
+        else:
+            success_text += "\n💎 Хочешь уведомления **за 7 дней**? Получи Premium!\n"
+
+        success_text += "Ты делаешь мир лучше — спасибо! 🌍"
 
         await update.message.reply_text(
             success_text,
@@ -440,6 +749,20 @@ async def recognize_product(photo_path: str) -> str:
     return random.choice(products)
 
 async def start_add_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM products WHERE user_id = ? AND notified = FALSE", (user_id,))
+            active_count = cursor.fetchone()[0]
+            if active_count >= 10:
+                await update.message.reply_text(
+                    "🚫 Бесплатная версия позволяет отслеживать до 10 активных продуктов.\n\n"
+                    "💎 Хочешь больше? Получи Premium: нажми «💎 Получить Premium» в меню!",
+                    reply_markup=get_main_menu_keyboard()
+                )
+                return ConversationHandler.END
+
     await update.message.reply_text(
         "📸 *Добавление по фото*\n\n"
         "Отправь мне фото упаковки продукта — я постараюсь распознать его название!\n\n"
@@ -481,7 +804,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# --- Прочие обработчики ---
+# --- Прочие обработчики (без изменений) ---
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with sqlite3.connect('products.db') as conn:
@@ -562,11 +885,13 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   • Нажми '📸 Добавить по фото' и отправь снимок упаковки.\n"
         "   • Или '✍️ Добавить вручную' — введи название и даты.\n\n"
         "2️⃣ *Получать напоминания:*\n"
-        "   • Я автоматически напомню за 3 и за 1 день до окончания срока!\n\n"
+        "   • Я автоматически напомню за 3 и за 1 день до окончания срока!\n"
+        "   • 💎 Premium: ещё за 7 и 5 дней!\n\n"
         "3️⃣ *Использовать функции:*\n"
         "   • '📋 Мои продукты' — текущий список\n"
         "   • '📊 Статистика' — твои достижения\n"
-        "   • '👨‍🍳 Рецепты' — идеи для приготовления\n\n"
+        "   • '👨‍🍳 Рецепты' — идеи для приготовления\n"
+        "   • '💎 Получить Premium' — расширенные возможности\n\n"
         "🌱 Вместе мы сокращаем пищевые отходы и заботимся о планете!"
     )
     await update.message.reply_text(
@@ -595,6 +920,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🚨 Просроченные": show_expired_handler,
         "📊 Статистика": stats_handler,
         "👨‍🍳 Рецепты": recipes_handler,
+        "💎 Получить Premium": premium_handler,
         "🗑️ Очистить всё": clear_products_handler,
         "ℹ️ Помощь": help_handler,
     }
@@ -640,6 +966,15 @@ def main():
     application.add_handler(manual_conv)
     application.add_handler(photo_conv)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_choice))
+
+    # 💎 Премиум и промокоды
+    application.add_handler(CommandHandler("promo", activate_promo))
+    application.add_handler(CommandHandler("give_premium", give_premium))
+    application.add_handler(CommandHandler("list_promos", list_promo_codes))
+    application.add_handler(CommandHandler("create_promo", create_promo_code))
+
+    # 📤 Экспорт (премиум)
+    application.add_handler(CommandHandler("export", export_handler))
 
     # Ежедневная проверка просрочки в 9:00
     application.job_queue.run_daily(check_expired_daily, time(hour=9, minute=0))
