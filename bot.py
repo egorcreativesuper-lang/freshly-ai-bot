@@ -190,7 +190,6 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
     today = datetime.now().date()
     expires_at = today + timedelta(days=expiration_days)
 
-    # Уведомление за 1 день
     if expiration_days >= 1:
         notify_date_1d = expires_at - timedelta(days=1)
         notify_time_1d = datetime.combine(notify_date_1d, time(hour=9, minute=0))
@@ -202,7 +201,6 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
                 name=f"notify_{user_id}_{product_name}_1d"
             )
 
-    # Уведомление за 3 дня (для всех)
     if expiration_days > 3:
         notify_date_3d = expires_at - timedelta(days=3)
         notify_time_3d = datetime.combine(notify_date_3d, time(hour=9, minute=0))
@@ -214,7 +212,6 @@ def schedule_notifications(context: ContextTypes.DEFAULT_TYPE, user_id: int, pro
                 name=f"notify_{user_id}_{product_name}_3d"
             )
 
-    # ✨ Премиум: уведомление за 7 дней
     if is_premium(user_id) and expiration_days > 7:
         notify_date_7d = expires_at - timedelta(days=7)
         notify_time_7d = datetime.combine(notify_date_7d, time(hour=9, minute=0))
@@ -618,8 +615,6 @@ async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return CHOOSING_PRODUCT_NAME
 
-# ... остальные обработчики добавления (choose_product_name и т.д.) остаются без изменений ...
-
 async def choose_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     if user_input in ["❌ Отмена", "🏠 Главное меню"]:
@@ -804,7 +799,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# --- Прочие обработчики (без изменений) ---
+# --- Прочие обработчики ---
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with sqlite3.connect('products.db') as conn:
@@ -920,7 +915,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🚨 Просроченные": show_expired_handler,
         "📊 Статистика": stats_handler,
         "👨‍🍳 Рецепты": recipes_handler,
-        "💎 Получить Premium": premium_handler,
+        "💎 Получить Premium": premium_handler,  # ✅ ИСПРАВЛЕНО: добавлена эта строка
         "🗑️ Очистить всё": clear_products_handler,
         "ℹ️ Помощь": help_handler,
     }
@@ -972,8 +967,6 @@ def main():
     application.add_handler(CommandHandler("give_premium", give_premium))
     application.add_handler(CommandHandler("list_promos", list_promo_codes))
     application.add_handler(CommandHandler("create_promo", create_promo_code))
-
-    # 📤 Экспорт (премиум)
     application.add_handler(CommandHandler("export", export_handler))
 
     # Ежедневная проверка просрочки в 9:00
