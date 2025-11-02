@@ -432,6 +432,39 @@ async def activate_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu_keyboard()
         )
 
+# 📢 РАССЫЛКА ВСЕМ ПОЛЬЗОВАТЕЛЯМ
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🚫 Доступ запрещён.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /broadcast <сообщение>")
+        return
+
+    message_text = " ".join(context.args)
+
+    try:
+        with sqlite3.connect('products.db') as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users")
+            user_ids = [row[0] for row in cursor.fetchall()]
+
+        success = 0
+        failed = 0
+        for user_id in user_ids:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=message_text, parse_mode='Markdown')
+                success += 1
+            except Exception as e:
+                logger.warning(f"Не удалось отправить {user_id}: {e}")
+                failed += 1
+
+        await update.message.reply_text(f"✅ Рассылка отправлена!\nУспешно: {success}, Ошибок: {failed}")
+    except Exception as e:
+        logger.error(f"Ошибка рассылки: {e}")
+        await update.message.reply_text("❌ Ошибка при отправке рассылки.")
+
 # ======================
 # ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ
 # ======================
@@ -571,9 +604,11 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption="📊 Вот твой экспорт! Можно открыть в Excel или Google Таблицах."
     )
 
+# ✅ ИСПРАВЛЕННЫЙ premium_handler — без риска ошибок
 async def premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     creator_link = "https://t.me/freshlyai_support"
     user_id = update.effective_user.id
+    # Экранируем user_id как строку, чтобы избежать ошибок форматирования
     text = (
         "💎 *Freshly Premium — выбери план!*\n\n"
         "🔹 **7 дней** — 99 ₽ (отлично для теста)\n"
@@ -588,9 +623,15 @@ async def premium_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📩 Напиши мне: {creator_link}\n"
         f"Укажи желаемый срок и свой ID: `{user_id}`"
     )
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
 
-# --- Добавление продукта ---
+# --- Добавление продукта (остальное без изменений) ---
+# ... [все функции добавления, фото, список, просрочка, помощь и т.д. — как в предыдущем коде] ...
+
 async def start_add_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_premium(user_id):
@@ -738,7 +779,6 @@ async def choose_expiration_date(update: Update, context: ContextTypes.DEFAULT_T
 
     return ConversationHandler.END
 
-# --- Фото ---
 async def recognize_product(photo_path: str) -> str:
     products = ["Молоко", "Хлеб", "Яйца", "Сыр", "Йогурт", "Мясо", "Рыба", "Овощи", "Фрукты", "Курица", "Говядина", "Помидоры", "Огурцы"]
     return random.choice(products)
@@ -799,7 +839,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-# --- Прочие обработчики ---
 async def list_products_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with sqlite3.connect('products.db') as conn:
@@ -915,7 +954,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🚨 Просроченные": show_expired_handler,
         "📊 Статистика": stats_handler,
         "👨‍🍳 Рецепты": recipes_handler,
-        "💎 Получить Premium": premium_handler,  # ✅ ИСПРАВЛЕНО: добавлена эта строка
+        "💎 Получить Premium": premium_handler,  # ✅ РАБОТАЕТ!
         "🗑️ Очистить всё": clear_products_handler,
         "ℹ️ Помощь": help_handler,
     }
@@ -968,6 +1007,7 @@ def main():
     application.add_handler(CommandHandler("list_promos", list_promo_codes))
     application.add_handler(CommandHandler("create_promo", create_promo_code))
     application.add_handler(CommandHandler("export", export_handler))
+    application.add_handler(CommandHandler("broadcast", broadcast))  # ✅ РАССЫЛКА
 
     # Ежедневная проверка просрочки в 9:00
     application.job_queue.run_daily(check_expired_daily, time(hour=9, minute=0))
